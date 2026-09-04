@@ -678,17 +678,21 @@ public class MapleMap {
                 if (de.itemId == 0) { // meso
                     int mesos = Randomizer.nextInt(de.Maximum - de.Minimum) + de.Minimum;
 
-                    if (mesos > 0) {
-                        if (chr.getBuffedValue(BuffStat.MESOUP) != null) {
-                            mesos = NumberTool.doubleToInt(mesos * chr.getBuffedValue(BuffStat.MESOUP).doubleValue() / 100.0);
-                        }
-                        mesos = NumberTool.floatToInt(mesos * chr.getMesoRate());
-                        if (mesos <= 0) {
-                            mesos = Integer.MAX_VALUE;
-                        }
-
-                        spawnMesoDrop(mesos, calcDropPos(pos, mob.getPosition()), mob, chr, false, droptype);
+                    // 脏数据（如 drop_data.maximum_quantity <= 0）会算出 0 金币，此时不该占用
+                    // 掉落扇位：continue 会跳过循环末尾的 d++，后续掉落位置按当前 d 重算不受影响。
+                    if (mesos <= 0) {
+                        continue;
                     }
+
+                    if (chr.getBuffedValue(BuffStat.MESOUP) != null) {
+                        mesos = NumberTool.doubleToInt(mesos * chr.getBuffedValue(BuffStat.MESOUP).doubleValue() / 100.0);
+                    }
+                    mesos = NumberTool.floatToInt(mesos * chr.getMesoRate());
+                    if (mesos <= 0) {
+                        mesos = Integer.MAX_VALUE;
+                    }
+
+                    spawnMesoDrop(mesos, calcDropPos(pos, mob.getPosition()), mob, chr, false, droptype);
                 } else {
                     if (ItemConstants.getInventoryType(de.itemId) == InventoryType.EQUIP) {
                         idrop = ii.randomizeStats((Equip) ii.getEquipById(de.itemId));
