@@ -440,6 +440,7 @@
     condition.value.filter = '';
     condition.value.pageNo = 1;
     condition.value.pageSize = 20;
+    loadConfigs();
   };
 
   const typeChange = async (value: any) => {
@@ -510,11 +511,9 @@
 
   const customRequest = (option: RequestOption) => {
     setLoading(true);
-    try {
-      importYml(option);
-    } finally {
-      setLoading(false);
-    }
+    importYml(option)
+      .catch(() => undefined)
+      .finally(() => setLoading(false));
     return undefined;
   };
 
@@ -548,7 +547,7 @@
     align-items: center;
     justify-content: flex-start;
   }
-  :deep(.arco-space-horizontal, .arco-col arco-col-24) {
+  :deep(.arco-space-horizontal, .arco-col.arco-col-24) {
     flex-wrap: wrap;
     align-items: center;
   }

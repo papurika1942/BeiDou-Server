@@ -38,6 +38,7 @@ import javax.script.ScriptException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * @author Matze
@@ -46,8 +47,8 @@ public class NPCScriptManager extends AbstractScriptManager {
     private static final Logger log = LoggerFactory.getLogger(NPCScriptManager.class);
     private static final NPCScriptManager instance = new NPCScriptManager();
 
-    private final Map<Client, NPCConversationManager> cms = new HashMap<>();
-    private final Map<Client, Invocable> scripts = new HashMap<>();
+    private final Map<Client, NPCConversationManager> cms = new ConcurrentHashMap<>();
+    private final Map<Client, Invocable> scripts = new ConcurrentHashMap<>();
 
     public static NPCScriptManager getInstance() {
         return instance;
@@ -93,7 +94,7 @@ public class NPCScriptManager extends AbstractScriptManager {
             ScriptEngine engine = getInvocableScriptEngine("npc/" + filename + ".js", c);
 
             if (engine == null) {
-                c.getPlayer().dropMessage(1, "NPC " + npc + " is uncoded.");
+                c.getPlayer().dropMessage(1, "NPC " + npc + " 未编码。");
                 cm.dispose();
                 return;
             }
@@ -254,6 +255,7 @@ public class NPCScriptManager extends AbstractScriptManager {
         String scriptFolder = (cm.isItemScript() ? "item" : "npc");
         if (cm.getScriptName() != null) {
             resetContext(scriptFolder + "/" + cm.getScriptName() + ".js", c);
+            resetContext("BeiDouSpecial/" + cm.getScriptName() + ".js", c);
         } else {
             resetContext(scriptFolder + "/" + cm.getNpc() + ".js", c);
         }

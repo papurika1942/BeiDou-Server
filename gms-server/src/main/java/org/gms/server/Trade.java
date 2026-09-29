@@ -38,6 +38,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.gms.util.PacketCreator;
 import org.gms.util.Pair;
+import org.gms.extension.event.TradeInviteEvent;
+import org.gms.extension.runtime.HostHooks;
 
 import java.util.ArrayList;
 import java.util.LinkedList;
@@ -126,7 +128,9 @@ public class Trade {
 
         for (Item item : exchangeItems) {
             KarmaManipulator.toggleKarmaFlagToUntradeable(item);
-            InventoryManipulator.addFromDrop(chr.getClient(), item, show);
+            if (!HostHooks.tradeRelaxInventoryChecks(chr.getId())) {
+                InventoryManipulator.addFromDrop(chr.getClient(), item, show);
+            }
         }
 
         if (exchangeMeso > 0) {//此处对金币交易进行扣税处理
@@ -159,8 +163,14 @@ public class Trade {
         // 但如果 completeTrade 检查失败，会先 unlock 再 cancelTrade，正常客户端不会走 else 分支
         boolean bothLocked = isLocked() && partner != null && partner.isLocked();
         if (!bothLocked) {
-            for (Item item : items) {
-                InventoryManipulator.addFromDrop(chr.getClient(), item, show);
+            // Artificial participants hold virtual stock (their traded items are plugin-generated and
+            // never lived in a real inventory), so there is nothing to hand back. Returning them via
+            // addFromDrop also NPEs: bots share a single headless client whose getPlayer() is null.
+            // completeTrade() already skips delivery for them the same way; mirror it here.
+            if (!HostHooks.tradeRelaxInventoryChecks(chr.getId())) {
+                for (Item item : items) {
+                    InventoryManipulator.addFromDrop(chr.getClient(), item, show);
+                }
             }
             if (meso > 0) {
                 chr.gainMeso(meso, show, true, show);
@@ -186,11 +196,11 @@ public class Trade {
         chr.sendPacket(PacketCreator.getTradeResult(number, result));
     }
 
-    private boolean isLocked() {
+    public boolean isLocked() {
         return locked.get();
     }
 
-    private int getMeso() {
+    public int getMeso() {
         return meso;
     }
 
@@ -214,6 +224,14 @@ public class Trade {
         }
     }
 
+    public void setMesoBot(int meso) {
+        this.meso = meso;
+        chr.sendPacket(PacketCreator.getTradeMesoSet((byte) 0, this.meso));
+        if (partner != null) {
+            partner.getChr().sendPacket(PacketCreator.getTradeMesoSet((byte) 1, this.meso));
+        }
+    }
+
     public boolean addItem(Item item) {
         synchronized (items) {
             if (items.size() > 9) {
@@ -228,6 +246,17 @@ public class Trade {
             items.add(item);
         }
 
+        return true;
+    }
+
+    public boolean swapItem(Item item) {
+        synchronized (items) {
+            if (items.size() > 9) {
+                return false;
+            }
+            items.removeIf(existingItem -> existingItem.getPosition() == item.getPosition());
+            items.add(item);
+        }
         return true;
     }
 
@@ -271,6 +300,11 @@ public class Trade {
             tradeItems.add(new Pair<>(item, item.getInventoryType()));
         }
 
+        // Capacity must always be verified. relaxInventoryChecks only means the
+        // participant is artificial and holds virtual stock; its delivery is then
+        // owned by the plugin via onExchangeSuccess. Short-circuiting here would
+        // let an exchange through that completeTrade() never delivers, silently
+        // destroying the items.
         return Inventory.checkSpotsAndOwnership(chr, tradeItems);
     }
 
@@ -394,8 +428,8 @@ public class Trade {
             }
 
             logTrade(local, partner);
-            local.completeTrade();
-            partner.completeTrade();
+            completeExchangeFor(local);
+            completeExchangeFor(partner);
 
             partner.getChr().setTrade(null);
             chr.setTrade(null);
@@ -491,6 +525,10 @@ public class Trade {
 
     public static void inviteTrade(Character c1, Character c2) {
 
+        if (c1.getTrade() == null) {
+            startTrade(c1);
+        }
+
         if ((c1.isGM() && !c2.isGM()) && c1.gmLevel() < GameConfig.getServerInt("minimum_gm_level_to_trade")) {//GM等级低于几级不允许与非GM角色进行交易
             c1.message(I18nUtil.getMessage("Trade.inviteTrade.GM.msg1"));
             log.info(I18nUtil.getLogMessage("Trade.info.inviteTrade.GM.msg1"), c1.getName(), c2.getName());
@@ -526,6 +564,7 @@ public class Trade {
 
                 c1.sendPacket(PacketCreator.getTradeStart(c1.getClient(), c1.getTrade(), (byte) 0));
                 c2.sendPacket(PacketCreator.tradeInvite(c1));
+                HostHooks.publish(new TradeInviteEvent(c2, c1));
             } else {
                 c1.message(I18nUtil.getMessage("Trade.inviteTrade.createInvite.msg1"));
                 cancelTrade(c1, TradeResult.NO_RESPONSE);
@@ -541,10 +580,13 @@ public class Trade {
         InviteResult inviteRes = InviteCoordinator.answerInvite(InviteType.TRADE, c1.getId(), c2.getId(), true);
 
         InviteResultType res = inviteRes.result;
-        if (res == InviteResultType.ACCEPTED) {
+        if (res == InviteResultType.ACCEPTED
+                || HostHooks.tradeAutoAcceptVisit(c1.getId(), c2.getId())) {
             if (c1.getTrade() != null && c1.getTrade().getPartner() == c2.getTrade() && c2.getTrade() != null && c2.getTrade().getPartner() == c1.getTrade()) {
                 c2.sendPacket(PacketCreator.getTradePartnerAdd(c1));
-                c1.sendPacket(PacketCreator.getTradeStart(c1.getClient(), c1.getTrade(), (byte) 1));
+                if (!HostHooks.tradeSuppressPackets(c1.getId())) {
+                    c1.sendPacket(PacketCreator.getTradeStart(c1.getClient(), c1.getTrade(), (byte) 1));
+                }
                 c1.getTrade().setFullTrade(true);
                 c2.getTrade().setFullTrade(true);
             } else {
@@ -615,5 +657,30 @@ public class Trade {
             sj.add(I18nUtil.getLogMessage("Trade.info.inviteTrade.logTrade.msg3" , item.getQuantity(), itemName, item.getItemId()) + "\n");
         }
         return sj.toString();
+    }
+
+    public interface TradeResultCallback {
+        void onTradeResult(TradeResult result);
+    }
+
+    private TradeResultCallback callback;
+
+    public void setTradeResultCallback(TradeResultCallback callback) {
+        this.callback = callback;
+    }
+
+    private void setCallbackSuccessfulTrade() {
+        if (callback != null) {
+            callback.onTradeResult(TradeResult.SUCCESSFUL);
+        }
+    }
+
+    private static void completeExchangeFor(Trade side) {
+        Character participant = side.getChr();
+        if (HostHooks.tradeOnExchangeSuccess(participant.getId())) {
+            side.setCallbackSuccessfulTrade();
+            return;
+        }
+        side.completeTrade();
     }
 }

@@ -26,6 +26,7 @@ import org.gms.client.inventory.InventoryType;
 import org.gms.config.GameConfig;
 import org.gms.constants.game.GameConstants;
 import org.gms.constants.id.MapId;
+import org.gms.extension.runtime.HostHooks;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.timeout.IdleStateEvent;
@@ -86,13 +87,13 @@ import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -126,7 +127,7 @@ public class Client extends ChannelInboundHandlerAdapter {
     private volatile long lastPong;
     private int gmlevel;
     private Set<String> macs = new HashSet<>();
-    private Map<String, ScriptEngine> engines = new HashMap<>();
+    private Map<String, ScriptEngine> engines = new ConcurrentHashMap<>();
     private byte characterSlots = 3;
     private byte loginattempt = 0;
     private String pin = "";
@@ -220,7 +221,7 @@ public class Client extends ChannelInboundHandlerAdapter {
         if (handler != null && handler.validateState(this)) {
             try {
                 ThreadLocalUtil.setCurrentClient(this);
-                MonitoredChrLogger.logPacketIfMonitored(this, opcode, packet.getBytes());
+                MonitoredChrLogger.logPacketIfMonitored(this, opcode, packet);
                 handler.handlePacket(packet, this);
             } catch (final Throwable t) {
                 final String chrInfo = player != null ? player.getName() + " 地图 [" + player.getMap().getMapName() + "] (" + player.getMapId() + ")" : "?";
@@ -692,7 +693,7 @@ public class Client extends ChannelInboundHandlerAdapter {
                         loginok = 7;
                     } else if (GameConfig.getServerBoolean("use_debug") && GameConfig.getServerBoolean("no_password")) {
                         return 0;
-                    } else if (passhash.charAt(0) == '$' && passhash.charAt(1) == '2' && BCrypt.checkpw(pwd, passhash)) {
+                    } else if (passhash != null && passhash.length() >= 2 && passhash.charAt(0) == '$' && passhash.charAt(1) == '2' && BCrypt.checkpw(pwd, passhash)) {
                         loginok = (tos == 0) ? 23 : 0;
                     } else if (pwd.equals(passhash) || checkHash(passhash, "SHA-1", pwd) || checkHash(passhash, "SHA-512", pwd)) {
                         // thanks GabrielSin for detecting some no-bcrypt inconsistencies here
@@ -915,7 +916,9 @@ public class Client extends ChannelInboundHandlerAdapter {
             if (party.getLeader().getId() == idz && map != null) {
                 PartyCharacter lchr = null;
                 for (PartyCharacter pchr : party.getMembers()) {
-                    if (pchr != null && pchr.getId() != idz && (lchr == null || lchr.getLevel() <= pchr.getLevel()) && map.getCharacterById(pchr.getId()) != null) {
+                    // 自动继任时跳过 bot：玩家队长掉线后不得由 bot 接任队长。
+                    if (pchr != null && pchr.getId() != idz && !HostHooks.isArtificial(pchr.getId())
+                            && (lchr == null || lchr.getLevel() <= pchr.getLevel()) && map.getCharacterById(pchr.getId()) != null) {
                         lchr = pchr;
                     }
                 }
@@ -1214,6 +1217,14 @@ public class Client extends ChannelInboundHandlerAdapter {
 
     public void setScriptEngine(String name, ScriptEngine e) {
         engines.put(name, e);
+        // 封顶每客户端缓存的 GraalJS 引擎数量,防止长时间在线逛图玩家内存无界增长。
+        // 逐出任一条(引擎仅是缓存,逐出后下次对话重建,无功能影响)。
+        if (engines.size() > 32) {
+            Iterator<String> it = engines.keySet().iterator();
+            if (it.hasNext()) {
+                engines.remove(it.next());
+            }
+        }
     }
 
     public ScriptEngine getScriptEngine(String name) {
@@ -1370,10 +1381,17 @@ public class Client extends ChannelInboundHandlerAdapter {
     }
 
     private static boolean checkHash(String hash, String type, String password) {
+        if (hash == null || hash.isEmpty()) {
+            return false;
+        }
         try {
             MessageDigest digester = MessageDigest.getInstance(type);
             digester.update(password.getBytes(StandardCharsets.UTF_8), 0, password.length());
-            return HexTool.toHexString(digester.digest()).replace(" ", "").toLowerCase().equals(hash);
+            String hex = HexTool.toHexString(digester.digest()).replace(" ", "").toLowerCase();
+            if ("SHA-512".equals(type)) {   // 与注册格式一致:去掉末尾1位
+                hex = hex.substring(0, hex.length() - 1);
+            }
+            return hex.equals(hash);
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException("对字符串进行编码失败", e);
         }
@@ -1463,6 +1481,10 @@ public class Client extends ChannelInboundHandlerAdapter {
     }
 
     public synchronized void announceBossHpBar(Monster mm, final int mobHash, Packet packet) {
+        // Shared BotClient has no Character; bots never show a boss HP bar UI.
+        if (player == null) {
+            return;
+        }
         long timeNow = System.currentTimeMillis();
         int targetHash = player.getTargetHpBarHash();
 

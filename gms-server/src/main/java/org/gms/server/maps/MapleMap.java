@@ -74,6 +74,8 @@ import org.gms.server.partyquest.GuardianSpawnPoint;
 import org.gms.util.PacketCreator;
 import org.gms.util.Pair;
 import org.gms.util.Randomizer;
+import org.gms.extension.event.CharacterMapEnteredEvent;
+import org.gms.extension.runtime.HostHooks;
 
 import java.awt.*;
 import java.lang.ref.WeakReference;
@@ -93,6 +95,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
@@ -116,6 +119,7 @@ public class MapleMap {
     private final AtomicInteger spawnedMonstersOnMap = new AtomicInteger(0);
     private final AtomicInteger droppedItemCount = new AtomicInteger(0);
     private final Collection<Character> characters = new LinkedHashSet<>();
+    private final Set<Character> chrDisconnectedWhileBroadcasting = ConcurrentHashMap.newKeySet();
     private final Map<Integer, Set<Integer>> mapParty = new LinkedHashMap<>();
     private final Map<Integer, Portal> portals = new HashMap<>();
     private final Map<Integer, Integer> backgroundTypes = new HashMap<>();
@@ -125,7 +129,10 @@ public class MapleMap {
     private final Map<MobLootEntry, Long> mobLootEntries = new HashMap(20);
     private final List<Runnable> statUpdateRunnables = new ArrayList(50);
     private final List<Rectangle> areas = new ArrayList<>();
+    private final List<Rope> ropes = new ArrayList<>();
     private FootholdTree footholds = null;
+    private float footholdSpeed = 1.0f;
+    private boolean swim;
     private Pair<Integer, Integer> xLimits;  // caches the min and max x's with available footholds
     private final Rectangle mapArea = new Rectangle();
     private final int mapid;
@@ -254,7 +261,7 @@ public class MapleMap {
         this.dropsOn = !dropsOn;
     }
 
-    private static double getRangedDistance() {
+    public static double getRangedDistance() {
         return GameConfig.getServerBoolean("use_max_range") ? Double.POSITIVE_INFINITY : 722500;
     }
 
@@ -428,8 +435,10 @@ public class MapleMap {
             for (Character chr : characters) {
                 if (condition == null || condition.canSpawn(chr)) {
                     if (chr.getPosition().distanceSq(mapobject.getPosition()) <= getRangedDistance()) {
-                        inRangeCharacters.add(chr);
-                        chr.addVisibleMapObject(mapobject);
+                        if (!HostHooks.isArtificial(chr)) {
+                            inRangeCharacters.add(chr);
+                            chr.addVisibleMapObject(mapobject);
+                        }
                     }
                 }
             }
@@ -676,19 +685,23 @@ public class MapleMap {
                     pos.x = mobpos + ((d % 2 == 0) ? (25 * ((d + 1) / 2)) : -(25 * (d / 2)));
                 }
                 if (de.itemId == 0) { // meso
-                    int mesos = Randomizer.nextInt(de.Maximum - de.Minimum) + de.Minimum;
+                    int mesos = (de.Maximum != 1 && de.Maximum > de.Minimum) ? Randomizer.nextInt(de.Maximum - de.Minimum) + de.Minimum : de.Maximum;
 
-                    if (mesos > 0) {
-                        if (chr.getBuffedValue(BuffStat.MESOUP) != null) {
-                            mesos = NumberTool.doubleToInt(mesos * chr.getBuffedValue(BuffStat.MESOUP).doubleValue() / 100.0);
-                        }
-                        mesos = NumberTool.floatToInt(mesos * chr.getMesoRate());
-                        if (mesos <= 0) {
-                            mesos = Integer.MAX_VALUE;
-                        }
-
-                        spawnMesoDrop(mesos, calcDropPos(pos, mob.getPosition()), mob, chr, false, droptype);
+                    // 脏数据(如 drop_data.maximum_quantity <= 0)会产生 0 金币,此时不该占用掉落扇位;
+                    // pos.x 每轮都会按当前 d 重算,直接 continue 不会影响后续掉落的位置。
+                    if (mesos <= 0) {
+                        continue;
                     }
+
+                    if (chr.getBuffedValue(BuffStat.MESOUP) != null) {
+                        mesos = NumberTool.doubleToInt(mesos * chr.getBuffedValue(BuffStat.MESOUP).doubleValue() / 100.0);
+                    }
+                    mesos = NumberTool.floatToInt(mesos * chr.getMesoRate());
+                    if (mesos <= 0) {
+                        mesos = 1;
+                    }
+
+                    spawnMesoDrop(mesos, calcDropPos(pos, mob.getPosition()), mob, chr, false, droptype);
                 } else {
                     if (ItemConstants.getInventoryType(de.itemId) == InventoryType.EQUIP) {
                         idrop = ii.randomizeStats((Equip) ii.getEquipById(de.itemId));
@@ -705,12 +718,15 @@ public class MapleMap {
     }
 
     private byte dropGlobalItemsFromMonsterOnMap(List<MonsterGlobalDropEntry> globalEntry, Point pos, byte d, byte droptype, int mobpos, Character chr, Monster mob) {
-        Collections.shuffle(globalEntry);
+        // globalEntry 是 MonsterInformationProvider 按大陆缓存的共享列表,直接 shuffle 会并发污染共享数据;
+        // 洗本地副本,随机顺序语义不变。
+        List<MonsterGlobalDropEntry> shuffledEntry = new ArrayList<>(globalEntry);
+        Collections.shuffle(shuffledEntry);
 
         Item idrop;
         ItemInformationProvider ii = ItemInformationProvider.getInstance();
 
-        for (final MonsterGlobalDropEntry de : globalEntry) {
+        for (final MonsterGlobalDropEntry de : shuffledEntry) {
             if (Randomizer.nextInt(999999) < de.chance) {
                 if (droptype == 3) {
                     pos.x = mobpos + (d % 2 == 0 ? (40 * (d + 1) / 2) : -(40 * (d / 2)));
@@ -792,6 +808,11 @@ public class MapleMap {
 
     public void dropFromReactor(final Character chr, final Reactor reactor, Item drop, Point dropPos, short questid) {
         spawnDrop(drop, this.calcDropPos(dropPos, reactor.getPosition()), reactor, chr, (byte) (chr.getParty() != null ? 1 : 0), questid);
+    }
+
+    public void dropFromReactor(final Character chr, final Reactor reactor, Item drop, Point dropPos, short questid,
+                                short delay) {
+        dropFromReactor(chr, reactor, drop, dropPos, questid);
     }
 
     private void stopItemMonitor() {
@@ -926,8 +947,38 @@ public class MapleMap {
         droppedItemCount.incrementAndGet();
     }
 
+    private void instantiateItemDropNoExpire(MapItem mdrop) {
+        if (droppedItemCount.get() >= GameConfig.getServerInt("item_limit_on_map")) {
+            MapObject mapobj;
+            do {
+                mapobj = null;
+                objectWLock.lock();
+                try {
+                    while (mapobj == null && !registeredDrops.isEmpty()) {
+                        mapobj = registeredDrops.remove(0).get();
+                    }
+                } finally {
+                    objectWLock.unlock();
+                }
+            } while (!makeDisappearItemFromMap(mapobj));
+        }
+
+        objectWLock.lock();
+        try {
+            registerItemDropNoExpire(mdrop);
+            registeredDrops.add(new WeakReference<>(mdrop));
+        } finally {
+            objectWLock.unlock();
+        }
+        droppedItemCount.incrementAndGet();
+    }
+
     private void registerItemDrop(MapItem mdrop) {
         droppedItems.put(mdrop, !everlast ? Server.getInstance().getCurrentTime() + GameConfig.getServerLong("item_expire_time") : Long.MAX_VALUE);
+    }
+
+    private void registerItemDropNoExpire(MapItem mdrop) {
+        droppedItems.put(mdrop, Long.MAX_VALUE);
     }
 
     private void unregisterItemDrop(MapItem mdrop) {
@@ -978,7 +1029,7 @@ public class MapleMap {
             lootLock.lock();
             try {
                 long timeNow = Server.getInstance().getCurrentTime();
-                mobLootEntries.put(mle, timeNow + ((long) (0.42 * animationTime)));
+                mobLootEntries.put(mle, timeNow + Math.min(Math.max((long) (0.42 * animationTime), 1000), 3000));
             } finally {
                 lootLock.unlock();
             }
@@ -992,6 +1043,10 @@ public class MapleMap {
 
         lootLock.lock();
         try {
+            if (mobLootEntries.isEmpty()) {
+                return;
+            }
+
             mleList = new HashSet<>(mobLootEntries.entrySet());
         } finally {
             lootLock.unlock();
@@ -1177,6 +1232,14 @@ public class MapleMap {
         instantiateItemDrop(mdrop);
     }
 
+    /**
+     * Compatibility overload for delayed drop sources. Meso drops are instantiated
+     * immediately by the map's existing drop lifecycle, so the delay is packet-only.
+     */
+    public final void spawnMesoDrop(final int meso, final Point position, final MapObject dropper, final Character owner, final boolean playerDrop, final byte droptype, short delay) {
+        spawnMesoDrop(meso, position, dropper, owner, playerDrop, droptype);
+    }
+
     public final void disappearingItemDrop(final MapObject dropper, final Character owner, final Item item, final Point pos) {
         final Point droppos = calcDropPos(pos, pos);
         final MapItem mdrop = new MapItem(item, droppos, dropper, owner, owner.getClient(), (byte) 1, false);
@@ -1248,6 +1311,30 @@ public class MapleMap {
         return getMapObjectsInRange(new Point(0, 0), Double.POSITIVE_INFINITY, Arrays.asList(MapObjectType.MONSTER));
     }
 
+    public final List<MapObject> getHiredMerchants() {
+        return getMapObjectsInRange(new Point(0, 0), Double.POSITIVE_INFINITY, Arrays.asList(MapObjectType.HIRED_MERCHANT));
+    }
+
+    public final List<MapObject> getPlayerStores() {
+        return getMapObjectsInRange(new Point(0, 0), Double.POSITIVE_INFINITY, Arrays.asList(MapObjectType.SHOP));
+    }
+
+    public final List<PlayerShop> getAllPlayerShops() {
+        List<PlayerShop> list = new LinkedList<>();
+        for (MapObject mmo : getPlayerStores()) {
+            list.add((PlayerShop) mmo);
+        }
+        return list;
+    }
+
+    public final List<HiredMerchant> getAllHiredMerchants() {
+        List<HiredMerchant> list = new LinkedList<>();
+        for (MapObject mmo : getHiredMerchants()) {
+            list.add((HiredMerchant) mmo);
+        }
+        return list;
+    }
+
     public final List<Reactor> getAllReactors() {
         List<Reactor> list = new LinkedList<>();
         for (MapObject mmo : getReactors()) {
@@ -1258,12 +1345,19 @@ public class MapleMap {
     }
 
     public final List<Monster> getAllMonsters() {
-        List<Monster> list = new LinkedList<>();
-        for (MapObject mmo : getMonsters()) {
-            list.add((Monster) mmo);
+        List<Monster> ret = new ArrayList<>();
+        objectRLock.lock();
+        try {
+            for (MapObject mo : mapobjects.values()) {
+                if (mo.getType() == MapObjectType.MONSTER) {
+                    ret.add((Monster) mo);
+                }
+            }
+        } finally {
+            objectRLock.unlock();
         }
 
-        return list;
+        return ret;
     }
 
     public int countItems() {
@@ -1431,6 +1525,7 @@ public class MapleMap {
             }
         } else {
             if (removeKilledMonsterObject(monster)) {
+                broadcastMessage(PacketCreator.killMonster(monster.getObjectId(), animation), monster.getPosition());  // 先广播死亡包,客户端即刻播放死亡,避免怪物僵住或死亡表现滞后
                 try {
                     if (monster.getStats().getLevel() >= chr.getLevel() + 30 && !chr.isGM()) {
                         AutobanFactory.GENERAL.alert(chr, "因击杀超过自身30级的怪物[" + monster.getName() + "]被系统警告");
@@ -1507,7 +1602,6 @@ public class MapleMap {
                     e.printStackTrace();
                 } finally {     // thanks resinate for pointing out a memory leak possibly from an exception thrown
                     monster.dispatchMonsterKilled(true);
-                    broadcastMessage(PacketCreator.killMonster(monster.getObjectId(), animation), monster.getPosition());
                 }
             }
         }
@@ -1612,6 +1706,18 @@ public class MapleMap {
             if (reactor.destroy()) {
                 removeMapObject(reactor);
             }
+
+            List<Character> chars;
+            chrRLock.lock();
+            try {
+                chars = new ArrayList<>(characters);
+            } finally {
+                chrRLock.unlock();
+            }
+
+            for (Character chr : chars) {
+                chr.removeVisibleMapObject(reactor);
+            }
         }
     }
 
@@ -1643,10 +1749,44 @@ public class MapleMap {
             try {
                 r.resetReactorActions(0);
                 r.setAlive(true);
-                broadcastMessage(PacketCreator.triggerReactor(r, 0));
             } finally {
                 r.unlockReactor();
             }
+
+            reactorRespawn(r);
+        }
+    }
+
+    /**
+     * 向客户端同步反应堆重生后的状态:已有精灵的玩家用 TRIGGER 复位状态,
+     * 范围内没有精灵的玩家才发 SPAWN,避免同一反应堆重复生成导致客户端残影。
+     * @param reactor 重生后的反应堆
+     */
+    public void reactorRespawn(final Reactor reactor) {
+        List<Character> triggerChars = new LinkedList<>();
+        List<Character> spawnChars = new LinkedList<>();
+
+        chrRLock.lock();
+        try {
+            for (Character chr : characters) {
+                if (chr.getClient() != null && chr.getPosition().distanceSq(reactor.getPosition()) <= getRangedDistance()) {
+                    if (chr.isMapObjectVisible(reactor)) {
+                        triggerChars.add(chr);
+                    } else {
+                        spawnChars.add(chr);
+                    }
+                }
+            }
+        } finally {
+            chrRLock.unlock();
+        }
+
+        for (Character chr : triggerChars) {
+            chr.sendPacket(PacketCreator.triggerReactor(reactor, 0));
+        }
+        for (Character chr : spawnChars) {
+            reactor.sendSpawnData(chr.getClient());
+            chr.addVisibleMapObject(reactor);
         }
     }
 
@@ -1902,7 +2042,14 @@ public class MapleMap {
     public Point getGroundBelow(Point pos) {
         Point spos = new Point(pos.x, pos.y - 14); // Using -14 fixes spawning pets causing a lot of issues.
         spos = calcPointBelow(spos);
-        spos.y--;//shouldn't be null!
+        if (spos == null) {
+            // calcPointBelow returns null when no foothold lies below 'pos' - a warp portal can sit
+            // over a gap (verified on map 600010600's st01 respawn point), so this is reachable in
+            // normal play, not just a malformed map. Every caller needs a point (pet/mob/door
+            // placement), so fall back to the given position instead of NPEing on the dereference.
+            return new Point(pos.x, pos.y);
+        }
+        spos.y--;
         return spos;
     }
 
@@ -1963,6 +2110,17 @@ public class MapleMap {
         synchronized (allMonsterSpawn) {
             return new ArrayList<>(allMonsterSpawn);
         }
+    }
+
+    public List<Point> getMonsterSpawnPositions() {
+        List<Point> positions = new ArrayList<>();
+        for (SpawnPoint spawnPoint : getAllMonsterSpawn()) {
+            Point position = spawnPoint.getPosition();
+            if (position != null) {
+                positions.add(new Point(position));
+            }
+        }
+        return positions;
     }
 
     public void spawnAllMonsterIdFromMapSpawnList(int id) {
@@ -2210,6 +2368,105 @@ public class MapleMap {
         activateItemReactors(mdrop, owner.getClient());
     }
 
+    /**
+     * Spawns a normal-expiry player drop that only {@code owner} can pick up.
+     * Used by host-directed transfers after the exact inventory item is removed.
+     */
+    public final MapItem spawnOwnerOnlyItemDrop(
+            final MapObject dropper,
+            final Character owner,
+            final Item item,
+            Point pos
+    ) {
+        if (FieldLimit.DROP_LIMIT.check(this.getFieldLimit())) {
+            return null;
+        }
+
+        final Point droppos = calcDropPos(pos, pos);
+        final MapItem mdrop = new MapItem(item, droppos, dropper, owner, owner.getClient(), (byte) 0, true);
+        mdrop.setDropTime(Server.getInstance().getCurrentTime());
+        mdrop.lockItem();
+        try {
+            mdrop.setPartyOwnerIdLocked(-1);
+            mdrop.setPermanentOwnerLocked(true);
+        } finally {
+            mdrop.unlockItem();
+        }
+
+        try {
+            spawnAndAddRangedMapObject(mdrop, c -> {
+                mdrop.lockItem();
+                try {
+                    c.sendPacket(PacketCreator.dropItemFromMapObject(
+                            c.getPlayer(), mdrop, dropper.getPosition(), droppos, (byte) 1));
+                } finally {
+                    mdrop.unlockItem();
+                }
+            }, null);
+        } catch (RuntimeException e) {
+            if (getMapObject(mdrop.getObjectId()) != mdrop) {
+                return null;
+            }
+            log.warn("Owner-only item {} spawned but one viewer notification failed",
+                    item.getItemId(), e);
+        }
+
+        mdrop.lockItem();
+        try {
+            try {
+                broadcastItemDropMessage(mdrop, dropper.getPosition(), droppos, (byte) 0);
+            } catch (RuntimeException e) {
+                log.warn("Owner-only item {} spawned but drop broadcast failed",
+                        item.getItemId(), e);
+            }
+        } finally {
+            mdrop.unlockItem();
+        }
+
+        instantiateItemDrop(mdrop);
+        try {
+            activateItemReactors(mdrop, owner.getClient());
+        } catch (RuntimeException e) {
+            log.warn("Owner-only item {} spawned but reactor activation failed",
+                    item.getItemId(), e);
+        }
+        return mdrop;
+    }
+
+    public final MapItem spawnItemDropNoExpire(final MapObject dropper, final Character owner, final Item item, Point pos,
+                                               final boolean ffaDrop, final boolean playerDrop) {
+        if (FieldLimit.DROP_LIMIT.check(this.getFieldLimit())) {
+            this.disappearingItemDrop(dropper, owner, item, pos);
+            return null;
+        }
+
+        final Point droppos = calcDropPos(pos, pos);
+        final MapItem mdrop = new MapItem(item, droppos, dropper, owner, owner.getClient(),
+                (byte) (ffaDrop ? 2 : 0), playerDrop);
+        mdrop.setDropTime(Server.getInstance().getCurrentTime());
+
+        spawnAndAddRangedMapObject(mdrop, c -> {
+            mdrop.lockItem();
+            try {
+                c.sendPacket(PacketCreator.dropItemFromMapObject(c.getPlayer(), mdrop, dropper.getPosition(), droppos,
+                        (byte) 1));
+            } finally {
+                mdrop.unlockItem();
+            }
+        }, null);
+
+        mdrop.lockItem();
+        try {
+            broadcastItemDropMessage(mdrop, dropper.getPosition(), droppos, (byte) 0);
+        } finally {
+            mdrop.unlockItem();
+        }
+
+        instantiateItemDropNoExpire(mdrop);
+        activateItemReactors(mdrop, owner.getClient());
+        return mdrop;
+    }
+
     public final void spawnItemDropList(List<Integer> list, final MapObject dropper, final Character owner, Point pos) {
         spawnItemDropList(list, 1, 1, dropper, owner, pos, true, false);
     }
@@ -2424,6 +2681,10 @@ public class MapleMap {
         chr.setMapId(mapid);
         chr.updateActiveEffects();
 
+        if (!HostHooks.isArtificial(chr)) {
+            HostHooks.publish(new CharacterMapEnteredEvent(chr, mapid));
+        }
+
         if (this.getHPDec() > 0) {
             getWorldServer().addPlayerHpDecrease(chr);
         } else {
@@ -2437,11 +2698,11 @@ public class MapleMap {
                 aggroMonitor.startAggroCoordinator();
             }
 
-            if (onFirstUserEnter.length() != 0) {
+            if (onFirstUserEnter.length() != 0 && !HostHooks.isArtificial(chr)) {
                 msm.runMapScript(chr.getClient(), "onFirstUserEnter/" + onFirstUserEnter, true);
             }
         }
-        if (onUserEnter.length() != 0) {
+        if (onUserEnter.length() != 0 && !HostHooks.isArtificial(chr)) {
             if (onUserEnter.equals("cygnusTest") && !MapId.isCygnusIntro(mapid)) {
                 chr.saveLocation("INTRO");
             }
@@ -2514,7 +2775,11 @@ public class MapleMap {
         Pet[] pets = chr.getPets();
         for (Pet pet : pets) {
             if (pet != null) {
-                pet.setPos(getGroundBelow(chr.getPosition()));
+                // 进图时宠物与主人同坐标、不吸附地面：位置保持一致，客户端接管物理自然落地。
+                // fh 必须为 0——否则会残留上一张图的 fh，客户端以 fh 为准反算坐标，宠物被吸到
+                // 新图同 id 的 foothold 上（位置残留 bug）。
+                pet.setPos(chr.getPosition());
+                pet.setFh(0);
                 chr.sendPacket(PacketCreator.showPet(chr, pet, false, false));
             } else {
                 break;
@@ -2559,7 +2824,12 @@ public class MapleMap {
             broadcastSpawnPlayerMapObjectMessage(chr, chr, true);
         }
 
-        sendObjectPlacement(chr.getClient());
+        // Artificial players have a headless client with no viewer Character.
+        // They must be visible to real players, but there is no socket/viewer
+        // that needs the map's existing objects sent back to them.
+        if (!HostHooks.isArtificial(chr)) {
+            sendObjectPlacement(chr.getClient());
+        }
 
         if (isStartingEventMap() && !eventStarted()) {
             chr.getMap().getPortal("join00").setPortalStatus(false);
@@ -2791,7 +3061,9 @@ public class MapleMap {
         chrRLock.lock();
         try {
             for (Character c : characters) {
-                if (c != null && c.isAwayFromWorld()) {
+                // SoloMapling bots stay on maps with awayFromWorld=true until marked entered;
+                // never treat them as disconnect ghosts.
+                if (c != null && c.isAwayFromWorld() && !HostHooks.isArtificial(c)) {
                     ghosts.add(c);
                 }
             }
@@ -2897,6 +3169,7 @@ public class MapleMap {
      * @param {Point} rangedFrom - 广播的起点位置。The starting point for broadcasting.
      */
     private void broadcastMessage(Character source, Packet packet, double rangeSq, Point rangedFrom) {
+        removeDisconnectedCharacters();
         chrRLock.lock();
         try {
             Iterator<Character> iterator = characters.iterator();
@@ -2905,7 +3178,7 @@ public class MapleMap {
                 if (chrDisconnected(iterator, chr)) {
                     continue;
                 }
-                if (chr != source) {
+                if (chr != source && !HostHooks.isArtificial(chr)) {
                     if (rangeSq < Double.POSITIVE_INFINITY) {
                         if (rangedFrom.distanceSq(chr.getPosition()) <= rangeSq) {
                             chr.sendPacket(packet);
@@ -2922,11 +3195,31 @@ public class MapleMap {
 
     private boolean chrDisconnected(Iterator<Character> iterator, Character chr) {
         // 如果玩家已经掉线，则移除地图该玩家，但不确保频道、大区该玩家是否仍会引发异常
-        if (chr == null || chr.getClient() == null) {
-            iterator.remove();
+        if (chr == null) {
+            return true;   // 空条目直接跳过：ConcurrentHashMap.newKeySet() 不允许 null 值，不能写入延迟清理集合
+        }
+        if (chr.getClient() == null) {
+            chrDisconnectedWhileBroadcasting.add(chr);
             return true;
         }
         return false;
+    }
+
+    private void removeDisconnectedCharacters() {
+        if (chrDisconnectedWhileBroadcasting.isEmpty()) {
+            return;
+        }
+        chrWLock.lock();
+        try {
+            for (Character chr : chrDisconnectedWhileBroadcasting) {
+                if (chr == null || chr.getClient() == null) {
+                    characters.remove(chr);
+                }
+            }
+            chrDisconnectedWhileBroadcasting.clear();
+        } finally {
+            chrWLock.unlock();
+        }
     }
 
     private void updateBossSpawn(Monster monster) {
@@ -2956,7 +3249,7 @@ public class MapleMap {
         chrRLock.lock();
         try {
             for (Character chr : characters) {
-                if (chr != source) {
+                if (chr != source && !HostHooks.isArtificial(chr)) {
                     if (rangeSq < Double.POSITIVE_INFINITY) {
                         if (rangedFrom.distanceSq(chr.getPosition()) <= rangeSq) {
                             chr.getClient().announceBossHpBar(mm, bossHash, packet);
@@ -2980,6 +3273,7 @@ public class MapleMap {
     }
 
     private void broadcastItemDropMessage(MapItem mdrop, Point dropperPos, Point dropPos, byte mod, double rangeSq, Point rangedFrom) {
+        removeDisconnectedCharacters();
         chrRLock.lock();
         try {
             Iterator<Character> iterator = characters.iterator();
@@ -3012,6 +3306,7 @@ public class MapleMap {
     }
 
     private void broadcastSpawnPlayerMapObjectMessage(Character source, Character player, boolean enteringField, boolean gmBroadcast) {
+        removeDisconnectedCharacters();
         chrRLock.lock();
         try {
             if (gmBroadcast) {
@@ -3045,6 +3340,7 @@ public class MapleMap {
     }
 
     public void broadcastUpdateCharLookMessage(Character source, Character player) {
+        removeDisconnectedCharacters();
         chrRLock.lock();
         try {
             Iterator<Character> iterator = characters.iterator();
@@ -3119,7 +3415,7 @@ public class MapleMap {
         if (chr != null) {
             for (MapObject o : getMapObjectsInRange(chr.getPosition(), getRangedDistance(), rangedMapobjectTypes)) {
                 if (o.getType() == MapObjectType.REACTOR) {
-                    if (((Reactor) o).isAlive()) {
+                    if (((Reactor) o).isAlive() && !chr.isMapObjectVisible(o)) {
                         o.sendSpawnData(chr.getClient());
                         chr.addVisibleMapObject(o);
                     }
@@ -3186,6 +3482,10 @@ public class MapleMap {
         return portals.get(portalid);
     }
 
+    public Collection<Portal> getPortals() {
+        return Collections.unmodifiableCollection(portals.values());
+    }
+
     public void addMapleArea(Rectangle rec) {
         areas.add(rec);
     }
@@ -3204,6 +3504,30 @@ public class MapleMap {
 
     public FootholdTree getFootholds() {
         return footholds;
+    }
+
+    public void addRope(Rope rope) {
+        ropes.add(rope);
+    }
+
+    public List<Rope> getRopes() {
+        return Collections.unmodifiableList(ropes);
+    }
+
+    public float getFootholdSpeed() {
+        return footholdSpeed;
+    }
+
+    public void setFootholdSpeed(float footholdSpeed) {
+        this.footholdSpeed = footholdSpeed;
+    }
+
+    public boolean isSwim() {
+        return swim;
+    }
+
+    public void setSwim(boolean swim) {
+        this.swim = swim;
     }
 
     public void setMapPointBoundings(int px, int py, int h, int w) {
@@ -3344,8 +3668,10 @@ public class MapleMap {
     private static void updateMapObjectVisibility(Character chr, MapObject mo) {
         if (!chr.isMapObjectVisible(mo)) { // object entered view range
             if (mo.getType() == MapObjectType.SUMMON || mo.getPosition().distanceSq(chr.getPosition()) <= getRangedDistance()) {
-                chr.addVisibleMapObject(mo);
-                mo.sendSpawnData(chr.getClient());
+                if (mo.getType() != MapObjectType.REACTOR || ((Reactor) mo).isAlive()) {
+                    chr.addVisibleMapObject(mo);
+                    mo.sendSpawnData(chr.getClient());
+                }
             }
         } else if (mo.getType() != MapObjectType.SUMMON && mo.getPosition().distanceSq(chr.getPosition()) > getRangedDistance()) {
             chr.removeVisibleMapObject(mo);
@@ -3363,29 +3689,69 @@ public class MapleMap {
     public void movePlayer(Character player, Point newPosition) {
         player.setPosition(newPosition);
 
-        try {
-            MapObject[] visibleObjects = player.getVisibleMapObjects();
+        // 原实现每次移动:全图 mapobjects 拷贝 + 全图范围扫描(两次全图操作、多次集合分配)。
+        // 重构为单次读锁内遍历:身份校验与距离判断在锁内完成,发包在锁外,语义与原实现一致。
+        double rangedDistance = getRangedDistance();
+        Point playerPos = player.getPosition();
+        List<MapObject> toSpawn = new ArrayList<>();
+        List<MapObject> toRemove = new ArrayList<>();
 
-            Map<Integer, MapObject> mapObjects = getCopyMapObjects();
-            for (MapObject mo : visibleObjects) {
-                if (mo != null) {
-                    if (mapObjects.get(mo.getObjectId()) == mo) {
-                        updateMapObjectVisibility(player, mo);
-                    } else {
+        objectRLock.lock();
+        try {
+            try {
+                for (MapObject mo : player.getVisibleMapObjects()) {
+                    if (mo == null) {
+                        continue;
+                    }
+                    if (mapobjects.get(mo.getObjectId()) != mo) {
                         player.removeVisibleMapObject(mo);
+                        continue;
+                    }
+
+                    if (!player.isMapObjectVisible(mo)) {
+                        // 对应原 updateMapObjectVisibility 分支1:可见集被并发移除后的重入范围补发
+                        if (mo.getType() == MapObjectType.SUMMON || mo.getPosition().distanceSq(playerPos) <= rangedDistance) {
+                            if (mo.getType() != MapObjectType.REACTOR || ((Reactor) mo).isAlive()) {
+                                toSpawn.add(mo);
+                            }
+                        }
+                    } else if (mo.getType() != MapObjectType.SUMMON && mo.getPosition().distanceSq(playerPos) > rangedDistance) {
+                        toRemove.add(mo);
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+            for (MapObject mo : mapobjects.values()) {
+                if (!rangedMapobjectTypes.contains(mo.getType())) {
+                    continue;
+                }
+                if (mo.getPosition().distanceSq(playerPos) > rangedDistance) {
+                    continue;
+                }
+                if (!player.isMapObjectVisible(mo) && !toSpawn.contains(mo)) {
+                    if (mo.getType() != MapObjectType.REACTOR || ((Reactor) mo).isAlive()) {
+                        toSpawn.add(mo);
                     }
                 }
             }
-        } catch (Exception e) {
-            e.printStackTrace();
+        } finally {
+            objectRLock.unlock();
         }
 
-        for (MapObject mo : getMapObjectsInRange(player.getPosition(), getRangedDistance(), rangedMapobjectTypes)) {
-            if (!player.isMapObjectVisible(mo)) {
-                mo.sendSpawnData(player.getClient());
-                player.addVisibleMapObject(mo);
-            }
+        for (MapObject mo : toRemove) {
+            player.removeVisibleMapObject(mo);
+            mo.sendDestroyData(player.getClient());
         }
+        for (MapObject mo : toSpawn) {
+            mo.sendSpawnData(player.getClient());
+            player.addVisibleMapObject(mo);
+        }
+    }
+
+    public void moveBot(Character player, Point newPosition) {
+        player.setPosition(newPosition);
     }
 
     public final void toggleEnvironment(final String ms) {
@@ -3488,6 +3854,7 @@ public class MapleMap {
     }
 
     public void broadcastNightEffect() {
+        removeDisconnectedCharacters();
         chrRLock.lock();
         try {
             Iterator<Character> iterator = characters.iterator();
@@ -3576,8 +3943,17 @@ public class MapleMap {
             // Normal Drops
             d = dropItemsFromMonsterOnMap(dropEntry, pos, d, chRate, droptype, mobpos, chr, mob);
 
-            // Global Drops
-            d = dropGlobalItemsFromMonsterOnMap(globalEntry, pos, d, droptype, mobpos, chr, mob);
+            // Global Drops — only when there are non-meso item drops
+            boolean hasItemDrop = false;
+            for (MonsterDropEntry e : dropEntry) {
+                if (e.itemId != 0) {
+                    hasItemDrop = true;
+                    break;
+                }
+            }
+            if (hasItemDrop) {
+                d = dropGlobalItemsFromMonsterOnMap(globalEntry, pos, d, droptype, mobpos, chr, mob);
+            }
 
             // Quest Drops
             d = dropItemsFromMonsterOnMap(visibleQuestEntry, pos, d, chRate, droptype, mobpos, chr, mob);
@@ -3898,6 +4274,7 @@ public class MapleMap {
     }
 
     private void broadcastGMMessage(Character source, Packet packet, double rangeSq, Point rangedFrom) {
+        removeDisconnectedCharacters();
         chrRLock.lock();
         try {
             Iterator<Character> iterator = characters.iterator();
@@ -3922,6 +4299,7 @@ public class MapleMap {
     }
 
     public void broadcastNONGMMessage(Character source, Packet packet, boolean repeatToSource) {
+        removeDisconnectedCharacters();
         chrRLock.lock();
         try {
             Iterator<Character> iterator = characters.iterator();
@@ -4458,12 +4836,21 @@ public class MapleMap {
             return null;
         }
         if (!this.guardianSpawns.isEmpty()) {
-            while (true) {
+            GuardianSpawnPoint fallback = null;
+            for (int round = 0; round < 10; round++) {
                 for (GuardianSpawnPoint gsp : this.guardianSpawns) {
-                    if (!gsp.isTaken() && Math.random() < 0.3 && (gsp.getTeam() == -1 || gsp.getTeam() == team)) {
-                        return gsp;
+                    if (!gsp.isTaken() && (gsp.getTeam() == -1 || gsp.getTeam() == team)) {
+                        if (fallback == null) {
+                            fallback = gsp;
+                        }
+                        if (Math.random() < 0.3) {
+                            return gsp;
+                        }
                     }
                 }
+            }
+            if (fallback != null) {
+                return fallback;
             }
         }
         return null;

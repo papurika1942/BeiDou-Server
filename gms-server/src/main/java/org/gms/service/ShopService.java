@@ -19,7 +19,9 @@ import org.gms.util.RequireUtil;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.stream.Collectors;
 import java.util.Objects;
 
 import static org.gms.dao.entity.table.ShopitemsDOTableDef.SHOPITEMS_D_O;
@@ -70,7 +72,9 @@ public class ShopService {
                     .npcName(npcName)
                     .build());
         }
-        return BasePageUtil.create(matchedShopsDOList.stream().distinct().toList(), data).page();
+        return BasePageUtil.create(matchedShopsDOList.stream()
+                .collect(Collectors.toMap(ShopSearchRtnDTO::getShopId, dto -> dto, (a, b) -> a, LinkedHashMap::new))
+                .values().stream().toList(), data).page();
     }
 
     public Page<ShopItemSearchRtnDTO> getShopItemList(ShopSearchReqDTO data) {

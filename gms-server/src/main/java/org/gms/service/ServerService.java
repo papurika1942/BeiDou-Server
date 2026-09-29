@@ -29,7 +29,11 @@ public class ServerService {
     }
 
     public List<ChannelListRtnDTO> channelList(int worldId) {
-        List<Channel> channels = Server.getInstance().getWorld(worldId).getChannels();
+        World world = Server.getInstance().getWorld(worldId);
+        if (world == null) {
+            return List.of();
+        }
+        List<Channel> channels = world.getChannels();
         return channels.stream()
                 .map(c -> ChannelListRtnDTO.builder().id(c.getId()).worldId(c.getWorld()).build())
                 .toList();

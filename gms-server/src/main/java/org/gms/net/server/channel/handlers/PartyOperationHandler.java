@@ -24,6 +24,9 @@ package org.gms.net.server.channel.handlers;
 import org.gms.client.Character;
 import org.gms.client.Client;
 import org.gms.config.GameConfig;
+import org.gms.extension.api.HostRuntime;
+import org.gms.extension.event.PartyInviteEvent;
+import org.gms.extension.runtime.ExtensionLoader;
 import org.gms.net.AbstractPacketHandler;
 import org.gms.net.packet.InPacket;
 import org.gms.net.server.coordinator.world.InviteCoordinator;
@@ -34,6 +37,7 @@ import org.gms.net.server.world.Party;
 import org.gms.net.server.world.PartyCharacter;
 import org.gms.net.server.world.PartyOperation;
 import org.gms.net.server.world.World;
+import org.gms.util.I18nUtil;
 import org.gms.util.PacketCreator;
 
 import java.util.List;
@@ -69,7 +73,7 @@ public final class PartyOperationHandler extends AbstractPacketHandler {
                 if (res == InviteResultType.ACCEPTED) {
                     Party.joinParty(player, partyid, false);
                 } else {
-                    c.sendPacket(PacketCreator.serverNotice(5, "You couldn't join the party due to an expired invitation request."));
+                    c.sendPacket(PacketCreator.serverNotice(5, "由于邀请请求已过期，你无法加入队伍。"));
                 }
                 break;
             }
@@ -78,11 +82,11 @@ public final class PartyOperationHandler extends AbstractPacketHandler {
                 Character invited = world.getPlayerStorage().getCharacterByName(name);
                 if (invited != null) {
                     if (invited.getLevel() < 10 && (!GameConfig.getServerBoolean("use_party_for_starters") || player.getLevel() >= 10)) { //min requirement is level 10
-                        c.sendPacket(PacketCreator.serverNotice(5, "The player you have invited does not meet the requirements."));
+                        c.sendPacket(PacketCreator.serverNotice(5, "你邀请的玩家不满足要求。"));
                         return;
                     }
                     if (GameConfig.getServerBoolean("use_party_for_starters") && invited.getLevel() >= 10 && player.getLevel() < 10) {    //trying to invite high level
-                        c.sendPacket(PacketCreator.serverNotice(5, "The player you have invited does not meet the requirements."));
+                        c.sendPacket(PacketCreator.serverNotice(5, "你邀请的玩家不满足要求。"));
                         return;
                     }
 
@@ -97,6 +101,7 @@ public final class PartyOperationHandler extends AbstractPacketHandler {
                         if (party.getMembers().size() < 6) {
                             if (InviteCoordinator.createInvite(InviteType.PARTY, player, party.getId(), invited.getId())) {
                                 invited.sendPacket(PacketCreator.partyInvite(player));
+                                publishInvite(invited, player, party.getId());
                             } else {
                                 c.sendPacket(PacketCreator.partyStatusMessage(22, invited.getName()));
                             }
@@ -118,10 +123,28 @@ public final class PartyOperationHandler extends AbstractPacketHandler {
             }
             case 6: { // change leader
                 int newLeader = p.readInt();
+                if (party == null || party.getLeaderId() != player.getId()) {
+                    player.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest"));
+                    return;
+                }
                 PartyCharacter newLeadr = party.getMemberById(newLeader);
+                if (newLeadr == null) {
+                    player.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest"));
+                    return;
+                }
                 world.updateParty(party.getId(), PartyOperation.CHANGE_LEADER, newLeadr);
                 break;
             }
         }
+    }
+
+    // The invite packet only reaches a real client. Extensions that own a character without one
+    // (SoloMapling bots) answer through this event instead.
+    private static void publishInvite(Character invited, Character inviter, int partyId) {
+        HostRuntime runtime = ExtensionLoader.getInstance().getRuntime();
+        if (runtime == null) {
+            return;
+        }
+        runtime.events().publish(new PartyInviteEvent(invited, inviter, partyId));
     }
 }

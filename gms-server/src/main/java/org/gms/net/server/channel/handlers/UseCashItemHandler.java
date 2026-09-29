@@ -53,6 +53,7 @@ import org.gms.net.packet.InPacket;
 import org.gms.net.packet.out.SendNoteSuccessPacket;
 import org.gms.net.server.Server;
 import org.gms.util.I18nUtil;
+import org.gms.util.Randomizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.gms.server.ItemInformationProvider;
@@ -241,6 +242,11 @@ public final class UseCashItemHandler extends AbstractPacketHandler {
                     return;
                 }
                 eq = player.getInventory(InventoryType.EQUIPPED).getItem((short) equipSlot);
+                if (eq == null) {
+                    player.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest"));
+                    c.enableActions();
+                    return;
+                }
                 eq.setOwner(player.getName());
             } else if (itemId == 5060001 || itemId == 5061000 || itemId == 5061001 || itemId == 5061002 || itemId == 5061003) { // Sealing lock
                 InventoryType type = InventoryType.getByType((byte) p.readInt());
@@ -637,6 +643,11 @@ public final class UseCashItemHandler extends AbstractPacketHandler {
             int itemSlot = p.readInt(); // 读取装备所在的槽位
             p.readInt(); // 读取一个整数，但未使用
             final Equip equip = (Equip) player.getInventory(InventoryType.EQUIP).getItem((short) itemSlot); // 获取指定槽位的装备
+            if (equip == null) {
+                player.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest"));
+                c.enableActions();
+                return;
+            }
             if (equip.getVicious() >= 2 || player.getInventory(InventoryType.CASH).findById(ItemId.VICIOUS_HAMMER) == null) {
                 c.enableActions(); // 发送启用操作的封包，修复金锤子失败后客户端假死。
                 return; // 如果装备的金锤子使用次数大于等于2或玩家没有金锤子，则返回
@@ -737,16 +748,12 @@ public final class UseCashItemHandler extends AbstractPacketHandler {
     private static boolean getIncubatedItem(Client c, int id) {
         final int[] ids = {1012070, 1302049, 1302063, 1322027, 2000004, 2000005, 2020013, 2020015, 2040307, 2040509, 2040519, 2040521, 2040533, 2040715, 2040717, 2040810, 2040811, 2070005, 2070006, 4020009,};
         final int[] quantitys = {1, 1, 1, 1, 240, 200, 200, 200, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3};
-        int amount = 0;
-        for (int i = 0; i < ids.length; i++) {
-            if (i == id) {
-                amount = quantitys[i];
-            }
-        }
+        int index = Randomizer.nextInt(ids.length);
+        int amount = quantitys[index];
         if (c.getPlayer().getInventory(InventoryType.getByType((byte) (id / 1000000))).isFull()) {
             return false;
         }
-        InventoryManipulator.addById(c, id, (short) amount);
+        InventoryManipulator.addById(c, ids[index], (short) amount);
         return true;
     }
 

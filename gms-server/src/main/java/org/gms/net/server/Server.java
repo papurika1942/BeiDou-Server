@@ -316,8 +316,13 @@ public class Server {
     public String[] getInetSocket(Client client, int world, int channel) {
         String remoteIp = client.getRemoteAddress();
 
-        String[] hostAddress = getIP(world, channel).split(":");
-        if (IpAddresses.isLocalAddress(remoteIp)) {
+        String ip = getIP(world, channel);
+        if (ip == null) {
+            return null;
+        }
+
+        String[] hostAddress = ip.split(":");
+        if (IpAddresses.isLocalAddress(remoteIp) || IpAddresses.isDockerBridgeAddress(remoteIp)) {
             hostAddress[0] = serviceProperty.getLocalhost();
         } else if (IpAddresses.isLanAddress(remoteIp)) {
             hostAddress[0] = serviceProperty.getLanHost();
@@ -1241,9 +1246,9 @@ public class Server {
 
         lgnWLock.lock();
         try {
-            accountCharacterCount.put(accountid, (short) (accountCharacterCount.get(accountid) + 1));
+            accountCharacterCount.merge(accountid, (short) 1, (current, one) -> (short) (current + one));
 
-            Set<Integer> accChars = accountChars.get(accountid);
+            Set<Integer> accChars = accountChars.computeIfAbsent(accountid, ignored -> new HashSet<>());
             accChars.add(chrid);
 
             worldChars.put(chrid, world);
@@ -1262,10 +1267,16 @@ public class Server {
     public void deleteCharacterEntry(Integer accountid, Integer chrid) {
         lgnWLock.lock();
         try {
-            accountCharacterCount.put(accountid, (short) (accountCharacterCount.get(accountid) - 1));
+            Short currentCount = accountCharacterCount.get(accountid);
+            if (currentCount == null || currentCount <= 0) {
+                return;
+            }
+            accountCharacterCount.put(accountid, (short) (currentCount - 1));
 
             Set<Integer> accChars = accountChars.get(accountid);
-            accChars.remove(chrid);
+            if (accChars != null) {
+                accChars.remove(chrid);
+            }
 
             Integer world = worldChars.remove(chrid);
             if (world != null) {

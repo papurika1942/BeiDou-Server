@@ -127,7 +127,11 @@ public class MapFactory {
 
             for (int i = 0; i < mobRespawnRate; i++) {
                 if (mobTime == -1) { //does not respawn, force spawn once
-                    map.spawnMonster(monster);
+                    if (i == 0) {
+                        map.spawnMonster(monster);
+                    } else {
+                        map.spawnMonster(new Monster(monster));
+                    }
                 } else {
                     map.addMonsterSpawn(monster, mobTime, team);
                 }
@@ -168,6 +172,11 @@ public class MapFactory {
 
         map.setFieldLimit(DataTool.getInt(infoData.getChildByPath("fieldLimit"), 0));
         map.setMobInterval((short) DataTool.getInt(infoData.getChildByPath("createMobInterval"), 5000));
+        map.setSwim(DataTool.getInt(infoData.getChildByPath("swim"), 0) != 0);
+        Data footholdSpeedData = infoData.getChildByPath("fs");
+        if (footholdSpeedData != null) {
+            map.setFootholdSpeed(DataTool.getFloat(footholdSpeedData));
+        }
         PortalFactory portalFactory = new PortalFactory();
         for (Data portal : mapData.getChildByPath("portal")) {
             map.addPortal(portalFactory.makePortal(DataTool.getInt(portal.getChildByPath("pt")), portal));
@@ -214,6 +223,7 @@ public class MapFactory {
                     Foothold fh = new Foothold(new Point(x1, y1), new Point(x2, y2), Integer.parseInt(footHold.getName()));
                     fh.setPrev(DataTool.getInt(footHold.getChildByPath("prev")));
                     fh.setNext(DataTool.getInt(footHold.getChildByPath("next")));
+                    fh.setForbidFallDown(DataTool.getInt(footHold.getChildByPath("forbidFallDown"), 0) != 0);
                     if (fh.getX1() < lBound.x) {
                         lBound.x = fh.getX1();
                     }
@@ -235,6 +245,16 @@ public class MapFactory {
             fTree.insert(fh);
         }
         map.setFootholds(fTree);
+        Data ropeData = mapData.getChildByPath("ladderRope");
+        if (ropeData != null) {
+            for (Data rope : ropeData) {
+                int x = DataTool.getInt(rope.getChildByPath("x"));
+                int y1 = DataTool.getInt(rope.getChildByPath("y1"));
+                int y2 = DataTool.getInt(rope.getChildByPath("y2"));
+                boolean ladder = DataTool.getInt(rope.getChildByPath("l"), 0) == 1;
+                map.addRope(new Rope(x, y1, y2, ladder));
+            }
+        }
         if (mapData.getChildByPath("area") != null) {
             for (Data area : mapData.getChildByPath("area")) {
                 int x1 = DataTool.getInt(area.getChildByPath("x1"));
@@ -410,9 +430,50 @@ public class MapFactory {
         return builder.toString();
     }
 
+    // The area node ("victoria", "ossyria", ...) that actually holds mapid in String.wz/Map.img.
+    //
+    // getMapStringName pins the area from the id's numeric range, but that table can't know about
+    // area nodes a regional WZ adds: the zh-CN Map.img keeps the whole 上海/嵩山 block (7xxxxxxxx)
+    // under a "china" node and the 5xxxxxxxx block under a "thai" node, neither of which the range
+    // table reaches, so the name came back empty. (The 8891xxxx block is duplicated under "jp" and
+    // "etc" for the same reason.) Resolve by id when the range's node doesn't own it — but keep the
+    // range lookup first so the common case stays a single path walk.
+    private static Data getMapNameData(int mapid) {
+        Data node = nameData.getChildByPath(getMapStringName(mapid));
+        if (node != null && node.getChildByPath("mapName") != null) {
+            return node;
+        }
+        String id = Integer.toString(mapid);
+        for (Data area : nameData.getChildren()) {
+            Data candidate = area.getChildByPath(id);
+            if (candidate != null) {
+                return candidate;
+            }
+        }
+        return node;
+    }
+
+    // A map image that carries no data of its own may still declare info/link to a template map
+    // (Nexon ships hundreds of id-only stubs that way). Such a stub has no entry in Map.img, so the
+    // name came back empty — even though loadMapFromWz already follows that same link for the map's
+    // geometry. Follow it here too, one hop like loadMapFromWz, so a stub reports the name of the map
+    // it copies. Maps that do have a Map.img entry take the branch above unchanged.
+    private static String loadLinkedName(int mapid, String field) {
+        Data node = getMapNameData(mapid);
+        if (node != null) {
+            return DataTool.getString(field, node, "");
+        }
+        Data infoData = mapSource.getData(getMapName(mapid)).getChildByPath("info");
+        String link = DataTool.getString(infoData.getChildByPath("link"), "");
+        if (link.isEmpty()) {
+            return "";
+        }
+        return DataTool.getString(field, getMapNameData(Integer.parseInt(link)), "");
+    }
+
     public static String loadPlaceName(int mapid) {
         try {
-            return DataTool.getString("mapName", nameData.getChildByPath(getMapStringName(mapid)), "");
+            return loadLinkedName(mapid, "mapName");
         } catch (Exception e) {
             return "";
         }
@@ -420,7 +481,7 @@ public class MapFactory {
 
     public static String loadStreetName(int mapid) {
         try {
-            return DataTool.getString("streetName", nameData.getChildByPath(getMapStringName(mapid)), "");
+            return loadLinkedName(mapid, "streetName");
         } catch (Exception e) {
             return "";
         }

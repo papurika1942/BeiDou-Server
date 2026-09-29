@@ -34,6 +34,9 @@ import org.gms.client.command.commands.gm5.*;
 import org.gms.client.command.commands.gm6.*;
 import org.gms.config.GameConfig;
 import org.gms.constants.id.MapId;
+import org.gms.extension.api.HostRuntime;
+import org.gms.extension.runtime.BeiDouHostCommandRegistry;
+import org.gms.extension.runtime.ExtensionLoader;
 import org.gms.manager.ServerManager;
 import org.gms.service.CommandService;
 import org.gms.util.I18nUtil;
@@ -118,6 +121,11 @@ public class CommandsExecutor {
 
         final Command command = registeredCommands.get(commandName);
         if (command == null) {
+            // Pass case-preserving params: lowercaseParams is only for matching
+            // built-in command names, and extensions may need exact player/item names.
+            if (tryExtensionCommand(client, commandName, splitedMessage[1].split(splitRegex))) {
+                return;
+            }
             client.getPlayer().yellowMessage(I18nUtil.getMessage("CommandsExecutor.handleInternal.message2", commandName));
             return;
         }
@@ -134,6 +142,37 @@ public class CommandsExecutor {
 
         command.execute(client, params);
         log.info(I18nUtil.getLogMessage("CommandsExecutor.handleInternal.info1"), client.getPlayer().getName(), command.getClass().getSimpleName());
+    }
+
+    private boolean tryExtensionCommand(Client client, String commandName, String[] params) {
+        HostRuntime runtime = ExtensionLoader.getInstance().getRuntime();
+        if (runtime == null || !(runtime.commands() instanceof BeiDouHostCommandRegistry registry)) {
+            return false;
+        }
+        BeiDouHostCommandRegistry.RegisteredCommand registered = registry.get(commandName);
+        if (registered == null) {
+            return false;
+        }
+        if (client.getPlayer().gmLevel() < registered.level()) {
+            client.getPlayer().yellowMessage(I18nUtil.getMessage("CommandsExecutor.handleInternal.message3"));
+            return true;
+        }
+        // params already preserves case (see handleInternal); copying it again
+        // allocated a redundant array on every extension command invocation.
+        String[] args = params.length > 0 && !params[0].isEmpty() ? params : new String[]{};
+        try {
+            registered.handler().handle(client.getPlayer().getId(), args);
+        } catch (Exception e) {
+            // Extensions are third-party code. Built-in commands run unguarded
+            // too, but a failing plugin must not surface as a packet-handler
+            // error and must not leave the client without enableActions().
+            // CommandsExecutor.extension.error 是 MessageFormat 风格（{0}），
+            // 所以参数要传给 getLogMessage；异常对象留给 slf4j 打堆栈。
+            log.error(I18nUtil.getLogMessage("CommandsExecutor.extension.error", commandName), e);
+            client.getPlayer().yellowMessage(I18nUtil.getMessage("CommandsExecutor.handleInternal.message2", commandName));
+        }
+        log.info(I18nUtil.getLogMessage("CommandsExecutor.handleInternal.info1"), client.getPlayer().getName(), "ext:" + commandName);
+        return true;
     }
 
     private void addCommandInfo(String name, Class<? extends Command> commandClass) {

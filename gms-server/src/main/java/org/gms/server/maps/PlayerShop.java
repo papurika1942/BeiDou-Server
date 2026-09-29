@@ -32,6 +32,7 @@ import org.gms.net.packet.Packet;
 import org.gms.server.Trade;
 import org.gms.util.PacketCreator;
 import org.gms.util.Pair;
+import org.gms.extension.runtime.HostHooks;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -126,7 +127,7 @@ public class PlayerShop extends AbstractMapObject {
         for (int i = 0; i < 3; i++) {
             if (visitors[i] == null) {
                 visitors[i] = visitor;
-                visitor.setSlot(i);
+                visitor.setSlot(i + 1);
 
                 this.broadcast(PacketCreator.getPlayerShopNewVisitor(visitor, i + 1));
                 owner.getMap().broadcastMessage(PacketCreator.updatePlayerShopBox(this));
@@ -149,7 +150,7 @@ public class PlayerShop extends AbstractMapObject {
                     visitors[i] = null;
                     visitor.setSlot(-1);
 
-                    this.broadcast(PacketCreator.getPlayerShopRemoveVisitor(i + 1));
+                    this.broadcast(PacketCreator.getPlayerShopRemoveVisitor(i + 1, PacketCreator.PLAYER_SHOP_LEAVE_USER_REQUEST));
                     owner.getMap().broadcastMessage(PacketCreator.updatePlayerShopBox(this));
                     return;
                 }
@@ -170,23 +171,18 @@ public class PlayerShop extends AbstractMapObject {
                     if (visitors[i] != null && visitors[i].getId() == visitor.getId()) {
                         visitor.setSlot(-1);    //absolutely cant remove player slot for late players without dc'ing them... heh
 
-                        for (int j = i; j < 2; j++) {
-                            if (visitors[j] != null) {
-                                owner.sendPacket(PacketCreator.getPlayerShopRemoveVisitor(j + 1));
-                            }
-                            visitors[j] = visitors[j + 1];
-                            if (visitors[j] != null) {
-                                visitors[j].setSlot(j);
-                            }
-                        }
-                        visitors[2] = null;
-                        for (int j = i; j < 2; j++) {
-                            if (visitors[j] != null) {
-                                owner.sendPacket(PacketCreator.getPlayerShopNewVisitor(visitors[j], j + 1));
-                            }
-                        }
+                        // Clear only the departing seat; the remaining guests KEEP their positions. Seats
+                        // must stay stable: the client pins every guest to the position it read on entry
+                        // (OnEnterResult), and the leave/close packets name a seat the receiver compares
+                        // against its own position. Compacting the array here would silently renumber a
+                        // remaining guest, so its client and the server would disagree on its seat - the
+                        // mismatch closes windows with blank popups and can disconnect. HiredMerchant and
+                        // the reference GMS095 server likewise leave a hole instead of renumbering.
+                        visitors[i] = null;
 
-                        this.broadcastRestoreToVisitors();
+                        owner.sendPacket(PacketCreator.getPlayerShopRemoveVisitor(i + 1, PacketCreator.PLAYER_SHOP_LEAVE_USER_REQUEST));
+
+                        this.broadcastRestoreToVisitors(i + 1);
                         owner.getMap().broadcastMessage(PacketCreator.updatePlayerShopBox(this));
                         return;
                     }
@@ -233,10 +229,11 @@ public class PlayerShop extends AbstractMapObject {
             if (shopItem.isExist()) {
                 if (shopItem.getBundles() > 0) {
                     Item iitem = shopItem.getItem().copy();
-                    iitem.setQuantity((short) (shopItem.getItem().getQuantity() * shopItem.getBundles()));
+                    int totalQuantity = shopItem.getItem().getQuantity() * shopItem.getBundles();
+                    iitem.setQuantity((short) Math.min(totalQuantity, Short.MAX_VALUE));
 
                     if (!Inventory.checkSpot(chr, iitem)) {
-                        chr.sendPacket(PacketCreator.serverNotice(1, "Have a slot available on your inventory to claim back the item."));
+                        chr.sendPacket(PacketCreator.serverNotice(1, "请在你的背包中空出一个位置再取回物品。"));
                         chr.sendPacket(PacketCreator.enableActions());
                         return;
                     }
@@ -271,6 +268,12 @@ public class PlayerShop extends AbstractMapObject {
                     return false;
                 }
 
+                if ((long) pItem.getItem().getQuantity() * quantity > Short.MAX_VALUE) {
+                    c.getPlayer().dropMessage(1, "单次购买数量过大，请分多次购买。");
+                    c.sendPacket(PacketCreator.enableActions());
+                    return false;
+                }
+
                 Item newItem = pItem.getItem().copy();
 
                 newItem.setQuantity((short) ((pItem.getItem().getQuantity() * quantity)));
@@ -287,7 +290,7 @@ public class PlayerShop extends AbstractMapObject {
 
                     if (c.getPlayer().getMeso() >= price) {
                         if (!owner.canHoldMeso(price)) {    // thanks Rohenn for noticing owner hold check misplaced
-                            c.getPlayer().dropMessage(1, "Transaction failed since the shop owner can't hold any more mesos.");
+                            c.getPlayer().dropMessage(1, "交易失败，因为店主无法持有更多金币。");
                             c.sendPacket(PacketCreator.enableActions());
                             return false;
                         }
@@ -311,16 +314,16 @@ public class PlayerShop extends AbstractMapObject {
                                     owner.setPlayerShop(null);
                                     this.setOpen(false);
                                     this.closeShop();
-                                    owner.dropMessage(1, "Your items are sold out, and therefore your shop is closed.");
+                                    owner.dropMessage(1, "你的商品已售罄，因此商店已关闭。");
                                 }
                             }
                         } else {
-                            c.getPlayer().dropMessage(1, "Your inventory is full. Please clear a slot before buying this item.");
+                            c.getPlayer().dropMessage(1, "你的背包已满。请在购买此物品前空出一个位置。");
                             c.sendPacket(PacketCreator.enableActions());
                             return false;
                         }
                     } else {
-                        c.getPlayer().dropMessage(1, "You don't have enough mesos to purchase this item.");
+                        c.getPlayer().dropMessage(1, "你没有足够的金币来购买此物品。");
                         c.sendPacket(PacketCreator.enableActions());
                         return false;
                     }
@@ -339,7 +342,7 @@ public class PlayerShop extends AbstractMapObject {
         visitorLock.lock();
         try {
             for (int i = 0; i < 3; i++) {
-                if (visitors[i] != null) {
+                if (visitors[i] != null && !HostHooks.isArtificial(visitors[i])) {
                     visitors[i].sendPacket(packet);
                 }
             }
@@ -348,12 +351,18 @@ public class PlayerShop extends AbstractMapObject {
         }
     }
 
-    public void broadcastRestoreToVisitors() {
+    // Re-syncs the remaining visitors after a visitor left: signal the departure, then rebuild the
+    // room so their seat/roster is correct again. The leave packet must name the DEPARTING seat,
+    // not the receiver's own seat: the client (CPersonalShopDlg::OnLeave) closes the shop window
+    // and pops a notice - with an empty message for an unmapped reason - only when the seat in the
+    // packet equals its own position. Sending each visitor its own seat would therefore close the
+    // browsing window of every remaining visitor with a blank popup.
+    public void broadcastRestoreToVisitors(int leavingSeat) {
         visitorLock.lock();
         try {
             for (int i = 0; i < 3; i++) {
                 if (visitors[i] != null) {
-                    visitors[i].sendPacket(PacketCreator.getPlayerShopRemoveVisitor(i + 1));
+                    visitors[i].sendPacket(PacketCreator.getPlayerShopRemoveVisitor(leavingSeat, PacketCreator.PLAYER_SHOP_LEAVE_USER_REQUEST));
                 }
             }
 
@@ -377,7 +386,11 @@ public class PlayerShop extends AbstractMapObject {
             try {
                 for (int i = 0; i < 3; i++) {
                     if (visitors[i] != null) {
-                        visitors[i].sendPacket(PacketCreator.shopErrorMessage(10, 1));
+                        // Each guest must be told its OWN seat left: the client (CPersonalShopDlg::OnLeave)
+                        // closes the window only when the packet's seat equals its own position, and reads
+                        // the next byte as the notice reason. A hardcoded seat would leave guests on other
+                        // seats unstuck (and can disconnect one whose seat has no avatar).
+                        visitors[i].sendPacket(PacketCreator.getPlayerShopRemoveVisitor(i + 1, PacketCreator.PLAYER_SHOP_LEAVE_HOST_OUT));
                         visitorList.add(visitors[i]);
                     }
                 }
@@ -421,17 +434,20 @@ public class PlayerShop extends AbstractMapObject {
     }
 
     public void chat(Client c, String chat) {
-        byte s = getVisitorSlot(c.getPlayer());
+        chat(c.getPlayer(), chat);
+    }
 
+    public void chat(Character player, String chat) {
+        byte s = getVisitorSlot(player);
         synchronized (chatLog) {
-            chatLog.add(new Pair<>(c.getPlayer(), chat));
+            chatLog.add(new Pair<>(player, chat));
             if (chatLog.size() > 25) {
                 chatLog.remove(0);
             }
-            chatSlot.put(c.getPlayer().getId(), s);
+            chatSlot.put(player.getId(), s);
         }
 
-        broadcast(PacketCreator.getPlayerShopChat(c.getPlayer(), chat, s));
+        broadcast(PacketCreator.getPlayerShopChat(player, chat, s));
     }
 
     private void recoverChatLog() {
@@ -490,6 +506,12 @@ public class PlayerShop extends AbstractMapObject {
         }
     }
 
+    public void setItems(List<PlayerShopItem> premadeShop) {
+        synchronized (items) {
+            items.addAll(premadeShop);
+        }
+    }
+
     public boolean hasItem(int itemid) {
         for (PlayerShopItem mpsi : getItems()) {
             if (mpsi.getItem().getItemId() == itemid && mpsi.isExist() && mpsi.getBundles() > 0) {
@@ -514,11 +536,13 @@ public class PlayerShop extends AbstractMapObject {
         }
 
         Character target = null;
+        int targetSeat = 0;
         visitorLock.lock();
         try {
             for (int i = 0; i < 3; i++) {
                 if (visitors[i] != null && visitors[i].getName().equals(name)) {
                     target = visitors[i];
+                    targetSeat = i + 1;
                     break;
                 }
             }
@@ -527,7 +551,9 @@ public class PlayerShop extends AbstractMapObject {
         }
 
         if (target != null) {
-            target.sendPacket(PacketCreator.shopErrorMessage(5, 1));
+            // The banned guest is addressed on its OWN seat with the "banned" reason; the client pops
+            // the notice only when the seat matches its position (see getPlayerShopRemoveVisitor).
+            target.sendPacket(PacketCreator.getPlayerShopRemoveVisitor(targetSeat, PacketCreator.PLAYER_SHOP_LEAVE_BANNED));
             removeVisitor(target);
         }
     }
@@ -536,23 +562,82 @@ public class PlayerShop extends AbstractMapObject {
         return bannedList.contains(name);
     }
 
+    /**
+     * Bot-side purchase. Consumes the shop's stock and credits the owner,
+     * mirroring the accounting half of {@code buy(Client, int, short)}.
+     *
+     * <p>Deliberately NOT mirrored: charging the buyer and delivering the item.
+     * A template-cloned bot is an in-memory clone of the fmbot row that is
+     * never persisted, so a delivered item would vanish on the next restart and
+     * any mesos charged would be silently destroyed. This is the upstream
+     * design (BeiDou-Server PR #846) - see HiredMerchant.botBuy.
+     *
+     * <p>Quantity semantics: {@code quantity} is a number of bundles, so the
+     * sale record reports {@code quantity} (bundles taken) exactly as upstream
+     * does. For rechargeable items (throwing stars, bullets) one bundle is the
+     * whole group - e.g. one entry of 500 stars is taken as one bundle.
+     *
+     * @return true if the purchase was recorded
+     */
+    public boolean botBuy(Character bot, PlayerShopItem shopItem, int itemPosition, short quantity) {
+        synchronized (items) {
+            if (!shopItem.isExist() || shopItem.getBundles() < quantity) {
+                return false;
+            }
+
+            visitorLock.lock();
+            try {
+                int price = (int) Math.min((float) shopItem.getPrice() * quantity, Integer.MAX_VALUE);
+                if (!owner.canHoldMeso(price)) {
+                    return false;
+                }
+
+                price -= Trade.getFee(price);
+                owner.gainMeso(price, true);
+
+                SoldItem soldItem = new SoldItem(bot.getName(), shopItem.getItem().getItemId(), quantity, price);
+                if (!HostHooks.isArtificial(owner)) {
+                    owner.sendPacket(PacketCreator.getPlayerShopOwnerUpdate(soldItem, itemPosition));
+                }
+                synchronized (sold) {
+                    sold.add(soldItem);
+                }
+
+                shopItem.setBundles((short) (shopItem.getBundles() - quantity));
+                if (shopItem.getBundles() < 1) {
+                    shopItem.setDoesExist(false);
+                    if (++boughtnumber == items.size()) {
+                        owner.setPlayerShop(null);
+                        setOpen(false);
+                        closeShop();
+                    }
+                }
+                return true;
+            } finally {
+                visitorLock.unlock();
+            }
+        }
+    }
+
     public synchronized boolean visitShop(Character chr) {
         if (this.isBanned(chr.getName())) {
-            chr.dropMessage(1, "You have been banned from this store.");
+            chr.dropMessage(1, "你已被这家商店禁止进入。");
             return false;
         }
 
         visitorLock.lock();
         try {
             if (!open.get()) {
-                chr.dropMessage(1, "This store is not yet open.");
+                chr.dropMessage(1, "这家商店还没有开门。");
                 return false;
             }
 
             if (this.hasFreeSlot() && !this.isVisitor(chr)) {
                 this.addVisitor(chr);
                 chr.setPlayerShop(this);
-                this.sendShop(chr.getClient());
+                if (!HostHooks.isArtificial(chr)) {
+                    this.sendShop(chr.getClient());
+                }
 
                 return true;
             }

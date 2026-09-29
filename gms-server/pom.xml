@@ -29,9 +29,12 @@
         <!-- Project -->
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <java.version>21</java.version>
-        <maven.compiler.source>${java.version}</maven.compiler.source>
-        <maven.compiler.target>${java.version}</maven.compiler.target>
+        <maven.compiler.release>${java.version}</maven.compiler.release>
         <mainClass>org.gms.ServerApplication</mainClass>
+
+        <!-- Skip -->
+        <maven.test.skip>true</maven.test.skip>
+        <maven.javadoc.skip>true</maven.javadoc.skip>
 
         <!-- Maven plugins -->
         <spring-boot-maven-plugin>3.3.1</spring-boot-maven-plugin> <!-- Disabled. (for building thin jar) -->
@@ -46,10 +49,11 @@
         <junit.version>5.10.2</junit.version> <!-- Unit test -->
         <mockito.version>5.11.0</mockito.version> <!-- Unit test -->
         <flyway-mysql.version>9.15.2</flyway-mysql.version>
-        <lombok.version>1.18.30</lombok.version>
+        <lombok.version>1.18.46</lombok.version>
         <fastjson2.version>2.0.47</fastjson2.version>
         <mybatis-flex.version>1.8.9</mybatis-flex.version>
         <swagger.version>2.5.0</swagger.version>
+        <woodstox.version>7.1.0</woodstox.version> <!-- Fast StAX XML parser (WZ loading) -->
     </properties>
 
     <dependencyManagement>
@@ -65,6 +69,12 @@
     </dependencyManagement>
 
     <dependencies>
+        <dependency>
+            <groupId>org.gms</groupId>
+            <artifactId>extension-api</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
         <!-- springboot -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -104,6 +114,11 @@
             <groupId>net.jcip</groupId>
             <artifactId>jcip-annotations</artifactId>
             <version>${jcip-annotations.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.woodstox</groupId>
+            <artifactId>woodstox-core</artifactId>
+            <version>${woodstox.version}</version>
         </dependency>
         <dependency>
             <groupId>org.flywaydb</groupId>
@@ -228,6 +243,29 @@
         <finalName>BeiDou</finalName>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.15.0</version>
+                <configuration>
+                    <release>${java.version}</release>
+                    <debug>false</debug>
+                    <debuglevel>none</debuglevel>
+                    <parameters>false</parameters>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                        <path>
+                            <groupId>com.mybatis-flex</groupId>
+                            <artifactId>mybatis-flex-processor</artifactId>
+                            <version>${mybatis-flex.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <version>${spring-boot-maven-plugin}</version>
@@ -237,6 +275,8 @@
                             <goal>repackage</goal>
                         </goals>
                         <configuration>
+                            <!-- Fat/runnable jar: BeiDou-boot.jar; main artifact stays thin for plugin compile -->
+                            <classifier>boot</classifier>
                             <mainClass>${mainClass}</mainClass>
                         </configuration>
                     </execution>

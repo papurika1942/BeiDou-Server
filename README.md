@@ -65,9 +65,46 @@ web中所有的图片均需要联网获取，感谢 https://maplestory.io 提供
 如果想下载北斗客户端的**早期Beta的版本**，可以[点击这里了解更多](https://github.com/BeiDouMS/BeiDou-Server/wiki/%E5%8C%97%E6%96%97%E5%AE%A2%E6%88%B7%E7%AB%AF%E5%8F%91%E5%B8%83) 
 
 # docker
-原服务端中docker相关配置已移除，配置已独立到[新的仓库](https://github.com/BeiDouMS/BeiDou-docker)，且支持[镜像拉取](https://github.com/BeiDouMS/BeiDou-docker/pkgs/container/beidou-server-all)。想参加docker开发，欢迎在新仓库进行pr。  
-[了解更多](https://github.com/BeiDouMS/BeiDou-docker)
+本仓库已内置 Docker 构建/运行支持（`docker/` 与根目录 `docker-compose.yml`），使用 GraalVM JDK 21，默认数据库直连 `127.0.0.1:3308/GMS083`。快速开始见 [docker/README.md](docker/README.md)。
+
+原来的独立 Docker 仓库仍可参考：[BeiDou-docker](https://github.com/BeiDouMS/BeiDou-docker)。
 
 # Wiki
 发现很多同学的问题基本在Wiki中都有答案，欢迎大家去看看。另外如果发现Wiki中没有的问题，欢迎提issue，或直接补充。已将Wiki开放为所有人都可以编辑。  
 [Wiki地址](https://github.com/BeiDouMS/BeiDou-Server/wiki)
+
+# 扩展运行时 / SoloMapling
+
+北斗通过 **薄 SPI** 从 `gms-server/plugins/*.jar` 加载外部扩展。SoloMapling 框架在独立仓库 **solomapling-plugin**；本仓库只保留通用宿主能力（**不** `import soloMapling.*`）：
+
+| 组件 | 作用 |
+|------|------|
+| `extension-api` | `ServerExtension` / `HostRuntime` / `ArtificialCharacters` / `TradeParticipantHook` / 生命周期事件 |
+| `org.gms.extension.runtime` | `ExtensionLoader`、`HostHooks` |
+| `org.gms.extension.event` | `CharacterMapEnteredEvent`、`CharacterChatEvent`、`PartyInviteEvent`、`TradeInviteEvent`… |
+| 仿真 API | `BotClient`、`BotTier`、`moveBot` 等 |
+| `gms-server/plugins/` | 放置 `solomapling-plugin-*.jar` |
+
+插件在 `onLoad` 注册 `CharacterClassifier` 与可选的 `TradeParticipantHook`；宿主用 `HostHooks.isArtificial` / `HostHooks.trade*` 做超时/脚本/商店/交易分支，并用 `HostHooks.publish` 发游戏事件。详见 `gms-server/src/main/java/org/gms/extension/README.md`。
+
+```bash
+# 1) 安装宿主（供插件 compile provided）
+mvn -pl extension-api,gms-server -am install -DskipTests
+
+# 2) 在 solomapling-plugin 仓库打包，并拷入 plugins/
+cp /path/to/solomapling-plugin/target/solomapling-plugin-*-SNAPSHOT.jar gms-server/plugins/
+
+# 3) 工作目录必须是 gms-server
+cd gms-server
+java -Xmx4g -Dspring.config.location=src/main/resources/application.yml \
+  -jar target/BeiDou-boot.jar
+```
+
+`application.yml`：
+
+```yaml
+solomapling:
+  plugins-enabled: true
+  plugins-dir: plugins
+  spawn-bots-on-startup: true
+```

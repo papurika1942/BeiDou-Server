@@ -131,6 +131,7 @@ public final class MoveLifeHandler extends AbstractMovementPacketHandler {
                 nextSkillId = 0;
                 nextSkillLevel = 0;
                 nextUse = null;
+                nextMovementCouldBeSkill = false;   // 广播给其他玩家的"下一步可能放技能"标志与许可保持一致
             }
         }
 
@@ -165,7 +166,8 @@ public final class MoveLifeHandler extends AbstractMovementPacketHandler {
                         useSkillLevel, nextMovementCouldBeSkill, mobMp);
             }
 
-            map.broadcastMessage(player, PacketCreator.moveMonster(objectid, nextMovementCouldBeSkill, rawActivity, useSkillId, useSkillLevel, pOption, startPos, p, movementDataLength), serverStartPos);
+            map.broadcastMessage(player, PacketCreator.moveMonster(objectid, nextMovementCouldBeSkill,
+                    rawActivity, useSkillId, useSkillLevel, pOption, startPos, p, movementDataLength), serverStartPos);
             //updatePosition(res, monster, -2); //does this need to be done after the packet is broadcast?
             map.moveMonster(monster, monster.getPosition());
         } catch (EmptyMovementException e) {

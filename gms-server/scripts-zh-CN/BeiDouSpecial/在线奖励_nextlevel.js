@@ -25,52 +25,52 @@ var config = {
 			itemlist:[
 				// id解释：0：金币;  1：点券;  2：抵用券;  4、信用点; 5、经验值;  id ≥ 1_000_000 的为有效物品ID，自动区分，你只需要操心客户端有没有填入的物品即可。
 				{id:0,qty:10000},	//金币，数量1万
-				{id:2430033,qty:5}	//北斗指南书碎片，数量5
+				{id:2430033,qty:1}	//北斗指南书碎片，数量1
 			]
 		},{
-			online:30,
+			online:20,
 			itemlist:[
-				{id:0,qty:50000},	//金币
-				{id:1,qty:1000},	//点券，数量1千
-				{id:2430033,qty:10}	//北斗指南书碎片
+				{id:0,qty:20000},	//金币，数量2万
+				{id:1,qty:100},	//点券，数量100
+				{id:2430033,qty:2}	//北斗指南书碎片，数量2
+			]
+		},{
+			online:40,
+			itemlist:[
+				{id:0,qty:40000},	//金币，数量4万
+				{id:1,qty:200},	//点券，数量200
+				{id:2430033,qty:2},	//北斗指南书碎片，数量2
 			]
 		},{
 			online:60,
 			itemlist:[
-				{id:0,qty:100000},	//金币
-				{id:1,qty:1000},	//点券，数量1千
-				{id:2430033,qty:15},	//北斗指南书碎片
+				{id:0,qty:60000},	//金币，数量6万
+				{id:1,qty:300},	//点券，数量300
+				{id:2430033,qty:3},	//北斗指南书碎片，数量3
+			]
+		},{
+			online:80,
+			itemlist:[
+				{id:0,qty:80000},	//金币，数量8万
+				{id:1,qty:400},	//点券，数量400
+				{id:2430033,qty:3},	//北斗指南书碎片，数量3
+				{id:4310000,qty:1}	//绝对音感，数量1
+			]
+		},{
+			online:100,
+			itemlist:[
+				{id:0,qty:100000},	//金币，数量10万
+				{id:1,qty:500},	//点券，数量500
+				{id:2430033,qty:4},	//北斗指南书碎片，数量4
+				{id:4310000,qty:2}	//绝对音感，数量2
 			]
 		},{
 			online:120,
 			itemlist:[
-				{id:0,qty:150000},	//金币
-				{id:1,qty:3000},	//点券，数量1千
-				{id:2430033,qty:20},	//北斗指南书碎片
-			]
-		},{
-			online:240,
-			itemlist:[
-				{id:0,qty:200000},	//金币
-				{id:1,qty:4000},	//点券，数量1千
-				{id:2430033,qty:25},	//北斗指南书碎片
-				{id:4310000,qty:1}	//绝对音感
-			]
-		},{
-			online:360,
-			itemlist:[
-				{id:0,qty:400000},	//金币
-				{id:1,qty:5000},	//点券，数量1千
-				{id:2430033,qty:30},	//北斗指南书碎片
-				{id:4310000,qty:2}	//绝对音感
-			]
-		},{
-			online:480,
-			itemlist:[
-				{id:0,qty:500000},	//金币
-				{id:1,qty:6000},	//点券，数量1千
-				{id:2430033,qty:35},	//北斗指南书碎片
-				{id:4310000,qty:3}	//绝对音感
+				{id:0,qty:120000},	//金币，数量12万
+				{id:1,qty:500},	//点券，数量500
+				{id:2430033,qty:5},	//北斗指南书碎片，数量5
+				{id:4310000,qty:3}	//绝对音感，数量3
 			]
 		},
 	]
@@ -146,8 +146,11 @@ function levelmain() {
 }
 
 function levelclaimrewards(Select) {
+	if (!config.reward[Select]) {
+		cm.dispose();
+		return;
+	}
 	const reward = config.reward[Select];
-	g_ClaimStatus |= (1 << Select);
 	let text = "\r\n";
 		text += getRewardList(Select);
 	if (reward.isReceive) {	//已领取
@@ -246,6 +249,7 @@ function giveRewardItems(Select,count = 1) {
 			successItems.push(`#fUI/Basic.img/CheckBox/1# ${succitemshow}`);
 		}
 	}
+	g_ClaimStatus |= (1 << Select);//确认发放成功后才标记已领取
 	saveOnlineStatus(g_ClaimStatus);//更新领取记录
 	cm.dropMessage(0,`你已成功领取了 ${reward.title.toString().replace(/#[a-zA-Z]/g,"")}！`);
 	return `#fUI/UIWindow.img/QuestIcon/4/0#\r\n\r\n${successItems.join('\r\n')}`;

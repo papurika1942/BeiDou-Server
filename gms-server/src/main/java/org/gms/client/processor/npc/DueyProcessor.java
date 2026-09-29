@@ -136,15 +136,20 @@ public class DueyProcessor {
         ItemFactory.DUEY.saveItems(new LinkedList<>(), packageId, con);
     }
 
-    private static void removePackageFromDB(int packageId) {
-        try (Connection con = DatabaseConnection.getConnection();
-             PreparedStatement ps = con.prepareStatement("DELETE FROM dueypackages WHERE PackageId = ?")) {
-            ps.setInt(1, packageId);
-            ps.executeUpdate();
+    private static boolean removePackageFromDB(int packageId) {
+        try (Connection con = DatabaseConnection.getConnection()) {
+            con.setAutoCommit(false);
+            try (PreparedStatement ps = con.prepareStatement("DELETE FROM dueypackages WHERE PackageId = ?")) {
+                ps.setInt(1, packageId);
+                ps.executeUpdate();
 
-            deletePackageFromInventoryDB(con, packageId);
+                deletePackageFromInventoryDB(con, packageId);
+            }
+            con.commit();
+            return true;
         } catch (SQLException e) {
-            e.printStackTrace();
+            log.error("Failed to remove duey package {} from db", packageId, e);
+            return false;
         }
     }
 
@@ -210,7 +215,7 @@ public class DueyProcessor {
 
             int updateRows = ps.executeUpdate();
             if (updateRows < 1) {
-                log.error("Error trying to create package [mesos: {}, sender: {}, quick: {}, receiver chrId: {}]", mesos, sender, quick, toCid);
+                log.error("Error trying to create package [mesos: {}, sender: {}, quick: {}, receiver chrID: {}]", mesos, sender, quick, toCid);
                 return -1;
             }
 
@@ -219,7 +224,7 @@ public class DueyProcessor {
                 if (rs.next()) {
                     packageId = rs.getInt(1);
                 } else {
-                    log.error("Failed inserting package [mesos: {}, sender: {}, quick: {}, receiver chrId: {}]", mesos, sender, quick, toCid);
+                    log.error("Failed inserting package [mesos: {}, sender: {}, quick: {}, receiver chrID: {}]", mesos, sender, quick, toCid);
                     return -1;
                 }
             }
@@ -289,7 +294,7 @@ public class DueyProcessor {
         if (c.tryacquireClient()) {
             try {
                 if (c.getPlayer().isGM() && c.getPlayer().gmLevel() < GameConfig.getServerInt("minimum_gm_level_to_use_duey")) {
-                    c.getPlayer().message("You cannot use Duey to send items at your GM level.");
+                    c.getPlayer().message("你的GM等级不允许使用快递发送物品。");
                     log.info(String.format("GM %s tried to send a package to %s", c.getPlayer().getName(), recipient));
                     c.sendPacket(PacketCreator.sendDueyMSG(DueyProcessor.Actions.TOCLIENT_SEND_INCORRECT_REQUEST.getCode()));
                     return;
@@ -343,6 +348,18 @@ public class DueyProcessor {
                 if (recipientAccId == c.getAccID()) {
                     c.sendPacket(PacketCreator.sendDueyMSG(DueyProcessor.Actions.TOCLIENT_SEND_SAMEACC_ERROR.getCode()));
                     return;
+                }
+
+                // 预校验物品:避免先扣费建包再校验失败导致费用损失
+                if (invTypeId > 0) {
+                    ItemInformationProvider ii = ItemInformationProvider.getInstance();
+                    InventoryType invType = InventoryType.getByType(invTypeId);
+                    Inventory inv = c.getPlayer().getInventory(invType);
+                    Item preItem = inv.getItem(itemPos);
+                    if (preItem == null || preItem.getQuantity() < amount || preItem.isUntradeable() || ii.isUnmerchable(preItem.getItemId())) {
+                        c.sendPacket(PacketCreator.sendDueyMSG(DueyProcessor.Actions.TOCLIENT_SEND_INCORRECT_REQUEST.getCode()));
+                        return;
+                    }
                 }
 
                 if (quick) {
@@ -447,14 +464,22 @@ public class DueyProcessor {
                     }
 
                     return;
-                } else {
-                    InventoryManipulator.addFromDrop(c, dpItem, false);
                 }
+            }
+
+            // 先删除包裹(事务),成功后再发放,避免删除失败时重复领取
+            if (!removePackageFromDB(packageId)) {
+                c.sendPacket(PacketCreator.sendDueyMSG(Actions.TOCLIENT_RECV_UNKNOWN_ERROR.getCode()));
+                return;
+            }
+
+            if (dpItem != null) {
+                InventoryManipulator.addFromDrop(c, dpItem, false);
             }
 
             c.getPlayer().gainMeso(dp.getMesos(), false);
 
-            dueyRemovePackage(c, packageId, false);
+            c.sendPacket(PacketCreator.removeItemFromDuey(false, packageId));
         } catch (SQLException e) {
             e.printStackTrace();
         }

@@ -34,19 +34,27 @@ public final class WeddingTalkHandler extends AbstractPacketHandler {
 
     @Override
     public final void handlePacket(InPacket p, Client c) {
-        byte action = p.readByte();
-        if (action == 1) {
-            EventInstanceManager eim = c.getPlayer().getEventInstance();
+        EventInstanceManager eim = c.getPlayer().getEventInstance();
+        boolean isGroomOrBride = eim != null && (c.getPlayer().getId() == eim.getIntProperty("groomId") || c.getPlayer().getId() == eim.getIntProperty("brideId"));
 
-            if (eim != null && !(c.getPlayer().getId() == eim.getIntProperty("groomId") || c.getPlayer().getId() == eim.getIntProperty("brideId"))) {
+        if (p.available() > 0) {
+            // 带负载:神父对话/进度校验(TALK)。action==1 为进度校验,其余为通用进度响应。
+            byte action = p.readByte();
+            if (action == 1 && !isGroomOrBride) {
                 c.sendPacket(WeddingPackets.OnWeddingProgress(false, 0, 0, (byte) 2));
-            } else {
-                c.sendPacket(WeddingPackets.OnWeddingProgress(true, 0, 0, (byte) 3));
+                c.sendPacket(PacketCreator.enableActions());
+                return;
             }
         } else {
-            c.sendPacket(WeddingPackets.OnWeddingProgress(true, 0, 0, (byte) 3));
+            // 无负载:宾客祝福(TALK_MORE),非新人将祝福计入爱的积分
+            // 玩家不在婚礼事件中(eim 为 null)时直接忽略,避免 NPE
+            if (eim != null && !isGroomOrBride) {
+                eim.gridInsert(c.getPlayer(), 1);
+                c.getPlayer().dropMessage(5, "约翰大祭司：你的祝福已融入他们的爱中。对这对可爱的夫妇来说，这是多么高尚的举动！");
+            }
         }
 
+        c.sendPacket(WeddingPackets.OnWeddingProgress(true, 0, 0, (byte) 3));
         c.sendPacket(PacketCreator.enableActions());
     }
 }

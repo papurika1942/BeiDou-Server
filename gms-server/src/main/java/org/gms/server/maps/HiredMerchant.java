@@ -43,6 +43,7 @@ import org.gms.util.PacketCreator;
 import org.gms.util.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.gms.extension.runtime.HostHooks;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -69,7 +70,7 @@ public class HiredMerchant extends AbstractMapObject {
     private static final int VISITOR_HISTORY_LIMIT = 10;
     private static final int BLACKLIST_LIMIT = 20;
 
-    private final int ownerId;
+    private int ownerId;
     private final int itemId;
     private final int mesos = 0;
     private final int channel;
@@ -105,6 +106,14 @@ public class HiredMerchant extends AbstractMapObject {
         this.ownerName = owner.getName();
         this.description = desc;
         this.map = owner.getMap();
+    }
+
+    public void setOwnerId(int ownerId) {
+        this.ownerId = ownerId;
+    }
+
+    public void setOwnerName(String ownerName) {
+        this.ownerName = ownerName;
     }
 
     public void broadcastToVisitorsThreadsafe(Packet packet) {
@@ -255,16 +264,17 @@ public class HiredMerchant extends AbstractMapObject {
 
     public void takeItemBack(int slot, Character chr) {
         synchronized (items) {
-            if (ownerBanned || closing.get() || detached || !isOwner(chr) || isOpen()
+            if (ownerBanned || closing.get() || detached || !isOwner(chr)
                     || slot < 0 || slot >= items.size()) return;
             PlayerShopItem shopItem = items.get(slot);
             if (shopItem.isExist()) {
                 if (shopItem.getBundles() > 0) {
                     Item iitem = shopItem.getItem().copy();
-                    iitem.setQuantity((short) (shopItem.getItem().getQuantity() * shopItem.getBundles()));
+                    int totalQuantity = shopItem.getItem().getQuantity() * shopItem.getBundles();
+                    iitem.setQuantity((short) Math.min(totalQuantity, Short.MAX_VALUE));
 
                     if (!Inventory.checkSpot(chr, iitem)) {
-                        chr.sendPacket(PacketCreator.serverNotice(1, "Have a slot available on your inventory to claim back the item."));
+                        chr.sendPacket(PacketCreator.serverNotice(1, "请在你的背包中空出一个位置再取回物品。"));
                         chr.sendPacket(PacketCreator.enableActions());
                         return;
                     }
@@ -313,6 +323,12 @@ public class HiredMerchant extends AbstractMapObject {
                 return;
             }
 
+            if ((long) pItem.getItem().getQuantity() * quantity > Short.MAX_VALUE) {
+                c.getPlayer().dropMessage(1, "单次购买数量过大，请分多次购买。");
+                c.sendPacket(PacketCreator.enableActions());
+                return;
+            }
+
             Item newItem = pItem.getItem().copy();
 
             newItem.setQuantity((short) ((pItem.getItem().getQuantity() * quantity)));
@@ -348,19 +364,8 @@ public class HiredMerchant extends AbstractMapObject {
                         owner.addMerchantMesos(price);
                     } else {
                         try (Connection con = DatabaseConnection.getConnection()) {
-                            long merchantMesos = 0;
-                            try (PreparedStatement ps = con.prepareStatement("SELECT MerchantMesos FROM characters WHERE id = ?")) {
-                                ps.setInt(1, ownerId);
-                                try (ResultSet rs = ps.executeQuery()) {
-                                    if (rs.next()) {
-                                        merchantMesos = rs.getInt(1);
-                                    }
-                                }
-                            }
-                            merchantMesos += price;
-
-                            try (PreparedStatement ps = con.prepareStatement("UPDATE characters SET MerchantMesos = ? WHERE id = ?", PreparedStatement.RETURN_GENERATED_KEYS)) {
-                                ps.setInt(1, (int) Math.min(merchantMesos, Integer.MAX_VALUE));
+                            try (PreparedStatement ps = con.prepareStatement("UPDATE characters SET MerchantMesos = LEAST(CAST(MerchantMesos AS SIGNED) + ?, 2147483647) WHERE id = ?")) {
+                                ps.setInt(1, price);
                                 ps.setInt(2, ownerId);
                                 ps.executeUpdate();
                             }
@@ -369,12 +374,12 @@ public class HiredMerchant extends AbstractMapObject {
                         }
                     }
                 } else {
-                    c.getPlayer().dropMessage(1, "Your inventory is full. Please clear a slot before buying this item.");
+                    c.getPlayer().dropMessage(1, "你的背包已满。请在购买此物品前空出一个位置。");
                     c.sendPacket(PacketCreator.enableActions());
                     return;
                 }
             } else {
-                c.getPlayer().dropMessage(1, "You don't have enough mesos to purchase this item.");
+                c.getPlayer().dropMessage(1, "你没有足够的金币来购买此物品。");
                 c.sendPacket(PacketCreator.enableActions());
                 return;
             }
@@ -391,7 +396,7 @@ public class HiredMerchant extends AbstractMapObject {
 
         Character player = Server.getInstance().getWorld(world).getPlayerStorage().getCharacterById(ownerId);
         if (player != null && player.isLoggedInWorld()) {
-            player.dropMessage(6, "[Hired Merchant] Item '" + ItemInformationProvider.getInstance().getName(item.getItemId()) + "'" + qtyStr + " has been sold for " + mesos + " mesos. (" + inStore + " left)");
+            player.dropMessage(6, "[雇佣商店] 物品 '" + ItemInformationProvider.getInstance().getName(item.getItemId()) + "'" + qtyStr + " 已售出 " + mesos + " 金币。(剩余 " + inStore + " 件)");
         }
     }
 
@@ -545,7 +550,7 @@ public class HiredMerchant extends AbstractMapObject {
                         if (mpsi.getItem().getInventoryType().equals(InventoryType.EQUIP)) {
                             InventoryManipulator.addFromDrop(c, mpsi.getItem(), false);
                         } else {
-                            InventoryManipulator.addById(c, mpsi.getItem().getItemId(), (short) (mpsi.getBundles() * mpsi.getItem().getQuantity()), mpsi.getItem().getOwner(), -1, mpsi.getItem().getFlag(), mpsi.getItem().getExpiration());
+                            InventoryManipulator.addById(c, mpsi.getItem().getItemId(), (short) Math.min((long) mpsi.getBundles() * mpsi.getItem().getQuantity(), Short.MAX_VALUE), mpsi.getItem().getOwner(), -1, mpsi.getItem().getFlag(), mpsi.getItem().getExpiration());
                         }
                     }
                 }
@@ -734,23 +739,28 @@ public class HiredMerchant extends AbstractMapObject {
             open.set(false);
             return true;
         }
+        // 查库不持 items 锁：避免购买/上架被开店与换图路径阻塞。
+        boolean banned;
+        try (Connection con = DatabaseConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement("SELECT a.banned, a.tempban > CURRENT_TIMESTAMP AS temporarily_banned FROM accounts a JOIN characters c ON c.accountid = a.id WHERE c.id = ?")) {
+            ps.setInt(1, ownerId);
+            try (ResultSet rs = ps.executeQuery()) {
+                // 查不到角色记录说明店主不是真实角色（如人造/机器人商店），不能按封禁处理，
+                // 否则这类商店会被 setOpen 判为封禁而全部收店。封禁判定只在记录存在时生效。
+                banned = rs.next() && (rs.getInt("banned") == 1 || rs.getBoolean("temporarily_banned"));
+            }
+        } catch (SQLException | RuntimeException e) {
+            // 无法确定封禁状态时按封禁处理（fail-closed）：调用方会据此收店并注销注册，
+            // 若不注销该店会滞留在 world 注册表，导致店主此后永远无法再开店。
+            log.error(I18nUtil.getLogMessage("HiredMerchant.open.checkFailed", ownerId), e);
+            banned = true;
+        }
+
         synchronized (items) {
             if (ownerBanned || closing.get() || detached) return false;
-            // 创建时已注册，发布/维护结束时再查封禁，补住封号与开店交错的窗口。
-            try (Connection con = DatabaseConnection.getConnection();
-                 PreparedStatement ps = con.prepareStatement("SELECT a.banned, a.tempban > CURRENT_TIMESTAMP AS temporarily_banned FROM accounts a JOIN characters c ON c.accountid = a.id WHERE c.id = ?")) {
-                ps.setInt(1, ownerId);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next() || rs.getInt("banned") == 1 || rs.getBoolean("temporarily_banned")) {
-                        ownerBanned = true;
-                        open.set(false);
-                        return false;
-                    }
-                }
-            } catch (SQLException | RuntimeException e) {
+            if (banned) {
                 ownerBanned = true;
                 open.set(false);
-                log.error(I18nUtil.getLogMessage("HiredMerchant.open.checkFailed", ownerId), e);
                 return false;
             }
             open.set(true);
@@ -892,6 +902,78 @@ public class HiredMerchant extends AbstractMapObject {
 
     public Set<String> getBlacklist() {
         return Collections.unmodifiableSet(blacklist);
+    }
+
+    /**
+     * Bot-side purchase. Consumes the shop's stock and credits the owner,
+     * mirroring the accounting half of {@code buy(Client, int, short)}.
+     *
+     * <p>Deliberately NOT mirrored: charging the buyer and delivering the item.
+     * A template-cloned bot ({@code BotGeneration.createBot}) is an in-memory
+     * clone of the fmbot row that is never persisted, so a delivered item would
+     * vanish on the next restart and any mesos charged would be silently
+     * destroyed. This is the upstream design (BeiDou-Server PR #846).
+     *
+     * <p>Quantity semantics: {@code quantity} is a number of <em>bundles</em>,
+     * and one bundle carries {@code item.getQuantity()} items. For rechargeable
+     * items (throwing stars, bullets) a single bundle is the whole group - e.g.
+     * one entry of 500 stars is 500 stars - so the sale record and the sold
+     * announcement report {@code item.getQuantity()}, the actual item count,
+     * rather than the bundle count.
+     */
+    public void botBuy(Character bot, PlayerShopItem shopItem, short quantity) {
+        synchronized (items) {
+            Item item = shopItem.getItem().copy();
+            int price = (int) Math.min((float) shopItem.getPrice() * quantity, Integer.MAX_VALUE);
+            price -= Trade.getFee(price);
+
+            synchronized (sold) {
+                sold.add(new SoldItem(bot.getName(), shopItem.getItem().getItemId(), item.getQuantity(), price));
+            }
+
+            shopItem.setBundles((short) (shopItem.getBundles() - quantity));
+            if (shopItem.getBundles() < 1) {
+                shopItem.setDoesExist(false);
+            }
+
+            if (GameConfig.getServerBoolean("use_announce_shop_item_sold")) {
+                announceItemSold(item, price, getQuantityLeft(shopItem.getItem().getItemId()));
+            }
+
+            // Resolve by id: ownerName is mutable (setOwnerName) and could otherwise
+            // credit a different character that happens to share the name.
+            Character owner = Server.getInstance().getWorld(world).getPlayerStorage().getCharacterById(ownerId);
+            if (owner != null && !HostHooks.isArtificial(owner)) {
+                owner.addMerchantMesos(price);
+            } else {
+                try (Connection con = DatabaseConnection.getConnection()) {
+                    long merchantMesos = 0;
+                    try (PreparedStatement ps = con.prepareStatement("SELECT MerchantMesos FROM characters WHERE id = ?")) {
+                        ps.setInt(1, ownerId);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            if (rs.next()) {
+                                merchantMesos = rs.getInt(1);
+                            }
+                        }
+                    }
+                    merchantMesos += price;
+                    try (PreparedStatement ps = con.prepareStatement(
+                            "UPDATE characters SET MerchantMesos = ? WHERE id = ?")) {
+                        ps.setInt(1, (int) Math.min(merchantMesos, Integer.MAX_VALUE));
+                        ps.setInt(2, ownerId);
+                        ps.executeUpdate();
+                    }
+                } catch (SQLException e) {
+                    log.error(I18nUtil.getLogMessage("HiredMerchant.botBuy.error1", ownerName), e);
+                }
+            }
+
+            try {
+                saveItems(false);
+            } catch (SQLException e) {
+                log.error(I18nUtil.getLogMessage("HiredMerchant.botBuy.error1", ownerName), e);
+            }
+        }
     }
 
     private boolean isBlacklisted(String chrName) {

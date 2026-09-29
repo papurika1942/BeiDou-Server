@@ -366,6 +366,10 @@ public class Character extends AbstractCharacterObject {
     private final Map<Integer, Summon> summons = new LinkedHashMap<>();
     private final Map<Integer, CooldownValueHolder> coolDowns = new LinkedHashMap<>();
     private final EnumMap<Disease, Pair<DiseaseValueHolder, MobSkill>> diseases = new EnumMap<>(Disease.class);
+    // debuff 消失后的短暂免疫截止时间,value 为 Server 时钟下的毫秒时间戳,懒清理
+    private final EnumMap<Disease, Long> debuffImmuneUntil = new EnumMap<>(Disease.class);
+    /** debuff 消失后,同类 debuff 的免疫时长(毫秒),写死 5 秒 */
+    private static final long DEBUFF_IMMUNE_DURATION = 5000L;
     @Getter
     @Setter
     private byte[] quickSlotLoaded;
@@ -487,6 +491,7 @@ public class Character extends AbstractCharacterObject {
     @Setter
     @Getter
     private boolean chasing = false;
+    private BotTier botTier = BotTier.getDefaultTier(); // artificial-character performance tier (default C)
     private float mobExpRate = -1;
 
     @Getter
@@ -530,7 +535,7 @@ public class Character extends AbstractCharacterObject {
     }
 
 
-    private Character() {
+    public Character() {
         super.setListener(new CharacterListener(this));
         useCS = false;
         setStance(0);
@@ -626,6 +631,11 @@ public class Character extends AbstractCharacterObject {
         if (canRecvPartySearchInvite) {
             this.getWorldServer().getPartySearchCoordinator().attachPlayer(this);
         }
+    }
+
+    /** Headless / artificial characters: clear awayFromWorld without PartySearch side effects. */
+    public void markPresentInWorld() {
+        awayFromWorld.set(false);
     }
 
     public void setAwayFromChannelWorld() {
@@ -1416,7 +1426,7 @@ public class Character extends AbstractCharacterObject {
         changeMap(to, to.getPortal(portal));
     }
 
-    public void changeMap(final MapleMap target, Portal pto) {
+    public synchronized void changeMap(final MapleMap target, Portal pto) {
         canWarpCounter++;
 
         eventChangedMap(target.getId());    // player can be dropped from an event here, hence the new warping target.  //玩家可以从这里的事件中退出，因此成为新的扭曲目标。
@@ -1435,7 +1445,7 @@ public class Character extends AbstractCharacterObject {
         eventAfterChangedMap(this.getMapId());
     }
 
-    public void changeMap(final MapleMap target, final Point pos) {
+    public synchronized void changeMap(final MapleMap target, final Point pos) {
         canWarpCounter++;
 
         eventChangedMap(target.getId());
@@ -1451,7 +1461,7 @@ public class Character extends AbstractCharacterObject {
         eventAfterChangedMap(this.getMapId());
     }
 
-    public void forceChangeMap(final MapleMap target, Portal pto) {
+    public synchronized void forceChangeMap(final MapleMap target, Portal pto) {
         // will actually enter the map given as parameter, regardless of being an eventmap or whatnot       //将实际输入作为参数给出的映射，无论是事件映射还是其他什么
 
         canWarpCounter++;
@@ -1733,7 +1743,7 @@ public class Character extends AbstractCharacterObject {
      * @param pos
      * @param warpPacket
      */
-    private void changeMapInternal(final MapleMap to, final Point pos, Packet warpPacket) {
+    private synchronized void changeMapInternal(final MapleMap to, final Point pos, Packet warpPacket) {
         if (!canWarpMap) {
             return;
         }
@@ -1824,14 +1834,70 @@ public class Character extends AbstractCharacterObject {
 
     public void changeSkillLevel(Skill skill, byte newLevel, int newMasterlevel, long expiration) {
         if (newLevel > -1) {
-            skills.put(skill, new SkillEntry(newLevel, newMasterlevel, expiration));
+            // 入参为基础等级,叠加装备技能加成后存储;获取时按最大等级封顶
+            int bonus = equipSkillBonus.getOrDefault(skill.getId(), 0);
+            int effective = newLevel + bonus;
+            skills.put(skill, new SkillEntry((byte) effective, newMasterlevel, expiration));
             if (!GameConstants.isHiddenSkills(skill.getId())) {
-                sendPacket(PacketCreator.updateSkill(skill.getId(), newLevel, newMasterlevel, expiration));
+                sendPacket(PacketCreator.updateSkill(skill.getId(), Math.min(effective, skill.getMaxLevel()), newMasterlevel, expiration));
             }
+            updateLocalStats();   // 技能等级变化会联动本地属性(如武器专家攻击力),重算一次
         } else {
             skills.remove(skill);
             sendPacket(PacketCreator.updateSkill(skill.getId(), newLevel, newMasterlevel, -1)); //Shouldn't use expiration anymore :)
             characterService.removeSkill(SkillsDO.builder().skillid(skill.getId()).characterid(getId()).build());
+        }
+    }
+
+    /**
+     * 登录时初始化装备技能加成基线(只记录当前穿戴装备的加成和,不修改技能等级:
+     * 数据库中保存的已是穿戴状态下的有效等级,后续穿脱按基线做增减)。
+     */
+    public void initEquipSkillBonus() {
+        Map<Integer, Integer> newBonus = new HashMap<>();
+        for (Item item : getInventory(InventoryType.EQUIPPED).list()) {
+            if (item instanceof Equip equip && equip.hasActiveSkillBonus()) {
+                equip.getSkillBonus().forEach((skillId, lv) -> newBonus.merge(skillId, lv, Integer::sum));
+            }
+        }
+        equipSkillBonus = newBonus;
+    }
+
+    /**
+     * 重算装备技能加成(永恒/重生类):与旧加成对比,增减技能等级并推送变化。
+     * 穿戴、卸下、装备升级时调用。
+     */
+    public void applyEquipSkillBonus() {
+        Map<Integer, Integer> newBonus = new HashMap<>();
+        for (Item item : getInventory(InventoryType.EQUIPPED).list()) {
+            if (item instanceof Equip equip && equip.hasActiveSkillBonus()) {
+                equip.getSkillBonus().forEach((skillId, lv) -> newBonus.merge(skillId, lv, Integer::sum));
+            }
+        }
+
+        Map<Integer, Integer> oldBonus = equipSkillBonus;
+        equipSkillBonus = newBonus;
+
+        Set<Integer> affected = new HashSet<>(oldBonus.keySet());
+        affected.addAll(newBonus.keySet());
+        for (Integer skillId : affected) {
+            int oldB = oldBonus.getOrDefault(skillId, 0);
+            int newB = newBonus.getOrDefault(skillId, 0);
+            if (oldB == newB) {
+                continue;
+            }
+
+            Skill skill = SkillFactory.getSkill(skillId);
+            SkillEntry entry = skills.get(skill);
+            if (entry == null) {
+                continue;   // 未学习的技能不受加成影响
+            }
+
+            int effective = Math.max(0, entry.skillLevel - oldB) + newB;
+            skills.put(skill, new SkillEntry((byte) effective, entry.masterLevel, entry.expiration));
+            if (!GameConstants.isHiddenSkills(skillId)) {
+                sendPacket(PacketCreator.updateSkill(skillId, Math.min(effective, skill.getMaxLevel()), entry.masterLevel, entry.expiration));
+            }
         }
     }
 
@@ -2556,7 +2622,7 @@ public class Character extends AbstractCharacterObject {
     }
 
     public void giveDebuff(final Disease disease, MobSkill skill) {
-        if (!hasDisease(disease) && getDiseasesSize() < 2) {
+        if (!hasDisease(disease) && !isDebuffImmune(disease) && getDiseasesSize() < 2) {
             if (!(disease == Disease.SEDUCE || disease == Disease.STUN)) {
                 if (hasActiveBuff(Bishop.HOLY_SHIELD)) {
                     return;
@@ -2587,6 +2653,28 @@ public class Character extends AbstractCharacterObject {
         }
     }
 
+    /**
+     * 判断某类 debuff 是否仍处于消失后的免疫期内(同类 debuff 消失后 5 秒内不再中同一种)。
+     */
+    private boolean isDebuffImmune(final Disease disease) {
+        chrLock.lock();
+        try {
+            Long immuneUntil = debuffImmuneUntil.get(disease);
+            if (immuneUntil == null) {
+                return false;
+            }
+
+            if (immuneUntil <= Server.getInstance().getCurrentTime()) {
+                debuffImmuneUntil.remove(disease);
+                return false;
+            }
+
+            return true;
+        } finally {
+            chrLock.unlock();
+        }
+    }
+
     public void dispelDebuff(Disease debuff) {
         if (hasDisease(debuff)) {
             long mask = debuff.getValue();
@@ -2602,6 +2690,8 @@ public class Character extends AbstractCharacterObject {
             try {
                 diseases.remove(debuff);
                 diseaseExpires.remove(debuff);
+                // 消失后进入 5 秒免疫期,期间不会再中同一种 debuff
+                debuffImmuneUntil.put(debuff, Server.getInstance().getCurrentTime() + DEBUFF_IMMUNE_DURATION);
             } finally {
                 chrLock.unlock();
             }
@@ -2690,7 +2780,11 @@ public class Character extends AbstractCharacterObject {
         }
     }
 
+    // 装备技能加成(永恒/重生类),skills 表存放基础+加成的有效等级,保存时扣除本表
+    private Map<Integer, Integer> equipSkillBonus = new HashMap<>();
+
     public void equipChanged() {
+        applyEquipSkillBonus();   // 重算装备技能加成并推送变化
         getMap().broadcastUpdateCharLookMessage(this, this);
         equipchanged = true;
         updateLocalStats();
@@ -4702,6 +4796,9 @@ public class Character extends AbstractCharacterObject {
         int quickLv = GameConfig.getWorldInt(getWorld(), "quick_level");
         if (level >= quickLv) return 1;
 
+        // Must stay quick_level_exp_rate: that is the config_code written by
+        // V1.11.6 (and read back into world_prop). The short name quick_level_rate
+        // was the very mismatch that made this rate silently always 0.
         return 1f + (quickLv - level) * GameConfig.getWorldFloat(getWorld(), "quick_level_exp_rate");
     }
 
@@ -4937,6 +5034,22 @@ public class Character extends AbstractCharacterObject {
         }
     }
 
+    /**
+     * 返回角色当前所站 foothold 的 ID（SN）。
+     * 与 getFh() 不同：getFh() 返回的是 Y 坐标（供 StatEffect 等做坐标计算），
+     * 而客户端 SPAWN_PLAYER 包的 foothold 字段按 ID 匹配平台来决定绘制层级
+     * （CUser_DecodeSpawnPacket -> LookupFootholdById -> 写 CUser+0x130/+0x134），
+     * 发送 0 会让查找失败，远程角色被降到默认最低层，从而被前景装饰/绳索遮挡。
+     * 因此发包时必须使用本方法。
+     */
+    public int getFootholdId() {
+        Point pos = this.getPosition();
+        pos.y -= 6;
+
+        Foothold fh = map.getFootholds().findBelow(pos);
+        return fh == null ? 0 : fh.getId();
+    }
+
     public int getMapId() {
         if (map != null) {
             return map.getId();
@@ -4965,6 +5078,35 @@ public class Character extends AbstractCharacterObject {
 
     public int getTotalStr() {
         return localstr;
+    }
+
+    // GCMoveSystem: base 100 + equip bonuses + buff → BotMovementProfile bucket
+    public int getTotalMoveSpeedStat() {
+        int total = 100;
+        for (Item item : getInventory(InventoryType.EQUIPPED)) {
+            if (item instanceof Equip equip) {
+                total += equip.getSpeed();
+            }
+        }
+        Integer speedBuff = getBuffedValue(BuffStat.SPEED);
+        if (speedBuff != null) {
+            total += speedBuff;
+        }
+        return Math.max(1, total);
+    }
+
+    public int getTotalJumpStat() {
+        int total = 100;
+        for (Item item : getInventory(InventoryType.EQUIPPED)) {
+            if (item instanceof Equip equip) {
+                total += equip.getJump();
+            }
+        }
+        Integer jumpBuff = getBuffedValue(BuffStat.JUMP);
+        if (jumpBuff != null) {
+            total += jumpBuff;
+        }
+        return Math.max(1, total);
     }
 
     public int getTotalDex() {
@@ -5506,18 +5648,37 @@ public class Character extends AbstractCharacterObject {
     }
 
     public int getSkillLevel(int skill) {
-        SkillEntry ret = skills.get(SkillFactory.getSkill(skill));
-        if (ret == null) {
+        Skill sk = SkillFactory.getSkill(skill);
+        SkillEntry ret = skills.get(sk);
+        if (ret == null || sk == null) {
             return 0;
         }
-        return ret.skillLevel;
+        return Math.min(ret.skillLevel, sk.getMaxLevel());
     }
 
     public byte getSkillLevel(Skill skill) {
         if (skills.get(skill) == null) {
             return 0;
         }
-        return skills.get(skill).skillLevel;
+        return (byte) Math.min(skills.get(skill).skillLevel, skill.getMaxLevel());
+    }
+
+    /**
+     * 基础技能等级(不含装备加成),用于加技能点/技能书等升级操作
+     */
+    public int getBaseSkillLevel(Skill skill) {
+        SkillEntry ret = skills.get(skill);
+        if (ret == null) {
+            return 0;
+        }
+        return Math.max(0, ret.skillLevel - equipSkillBonus.getOrDefault(skill.getId(), 0));
+    }
+
+    /**
+     * 当前装备技能加成(技能id -> 加成等级)
+     */
+    public Map<Integer, Integer> getEquipSkillBonus() {
+        return equipSkillBonus;
     }
 
     public long getSkillExpiration(int skill) {
@@ -6381,7 +6542,8 @@ public class Character extends AbstractCharacterObject {
             ret.mp = rs.getInt("mp");
             ret.setMaxMp(rs.getInt("maxmp"));
             ret.remainingAp = rs.getInt("ap");
-            ret.loadCharSkillPoints(rs.getString("sp").split(","));
+            String spValue = rs.getString("sp");
+            ret.loadCharSkillPoints(spValue != null ? spValue.split(",") : new String[0]);
             ret.exp.set(rs.getInt("exp"));
             ret.fame = rs.getInt("fame");
             ret.gachaExp.set(rs.getInt("gachaexp"));
@@ -6909,7 +7071,7 @@ public class Character extends AbstractCharacterObject {
         enableActions();
     }
 
-    private void unsitChairInternal() {
+    public void unsitChairInternal() {
         int chairid = chair.get();
         if (chairid >= 0) {
             if (ItemConstants.isFishingChair(chairid)) {
@@ -6949,7 +7111,7 @@ public class Character extends AbstractCharacterObject {
         }
     }
 
-    private void setChair(int chair) {
+    public void setChair(int chair) {
         this.chair.set(chair);
     }
 
@@ -7449,7 +7611,41 @@ public class Character extends AbstractCharacterObject {
         savedLocations[SavedLocationType.fromString(type).ordinal()] = new SavedLocation(getMapId(), closest != null ? closest.getId() : 0);
     }
 
+    /**
+     * Creates a character in its own transaction, preserving the historical
+     * public method contract.
+     */
     public final boolean insertNewChar(CharacterFactoryRecipe recipe) {
+        try (Connection con = DatabaseConnection.getConnection()) {
+            con.setAutoCommit(false);
+            con.setTransactionIsolation(Connection.TRANSACTION_READ_UNCOMMITTED);
+            try {
+                if (!insertNewChar(recipe, con)) {
+                    con.rollback();
+                    return false;
+                }
+                con.commit();
+                return true;
+            } catch (Exception e) {
+                con.rollback();
+                throw e;
+            } finally {
+                con.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+                con.setAutoCommit(true);
+            }
+        } catch (Throwable t) {
+            log.error("Error creating chr {}, level: {}, job: {}", name, level, job.getId(), t);
+            return false;
+        }
+    }
+
+    /**
+     * Creates the character and all native child rows on the caller's
+     * connection. This method never commits, rolls back, closes, or changes
+     * transaction settings on that connection.
+     */
+    public final boolean insertNewChar(CharacterFactoryRecipe recipe, Connection con) throws SQLException {
+        Objects.requireNonNull(con, "con");
         attrStr = recipe.getStr();
         attrDex = recipe.getDex();
         attrInt = recipe.getInt();
@@ -7478,12 +7674,7 @@ public class Character extends AbstractCharacterObject {
         this.events.put("rescueGaga", new RescueGaga(0));
 
 
-        try (Connection con = DatabaseConnection.getConnection()) {
-            con.setAutoCommit(false);
-            con.setTransactionIsolation(Connection.TRANSACTION_READ_UNCOMMITTED);
-
-            try {
-                // Character info
+        // Character info
                 try (PreparedStatement ps = con.prepareStatement("INSERT INTO characters (str, dex, luk, `int`, gm, skincolor, gender, job, hair, face, map, meso, spawnpoint, accountid, name, world, hp, mp, maxhp, maxmp, level, ap, sp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", Statement.RETURN_GENERATED_KEYS)) {
                     ps.setInt(1, attrStr);
                     ps.setInt(2, attrDex);
@@ -7596,20 +7787,7 @@ public class Character extends AbstractCharacterObject {
                     }
                 }
 
-                con.commit();
-                return true;
-            } catch (Exception e) {
-                con.rollback();
-                throw e;
-            } finally {
-                con.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
-                con.setAutoCommit(true);
-            }
-        } catch (Throwable t) {
-            log.error("Error creating chr {}, level: {}, job: {}", name, level, job.getId(), t);
-        }
-
-        return false;
+        return true;
     }
 
     public void saveCharToDB() {
@@ -7944,35 +8122,45 @@ public class Character extends AbstractCharacterObject {
                      PreparedStatement psMedal = con.prepareStatement("INSERT INTO medalmaps VALUES (DEFAULT, ?, ?, ?)")) {
                     psStatus.setInt(1, id);
 
-                    for (QuestStatus qs : getQuestValues()) {
+                    // 任务量多时逐条 executeUpdate 会产生上千次网络往返(见保存耗时问题),
+                    // 改为整批插入:驱动对批量执行后 getGeneratedKeys() 按插入顺序返回全部自增ID。
+                    List<QuestStatus> questValues = new ArrayList<>(getQuestValues());
+                    for (QuestStatus qs : questValues) {
                         psStatus.setInt(2, qs.getQuest().getId());
                         psStatus.setInt(3, qs.getStatus().getId());
                         psStatus.setInt(4, (int) (qs.getCompletionTime() / 1000));
                         psStatus.setLong(5, qs.getExpirationTime());
                         psStatus.setInt(6, qs.getForfeited());
                         psStatus.setInt(7, qs.getCompleted());
-                        psStatus.executeUpdate();
+                        psStatus.addBatch();
+                    }
+                    psStatus.executeBatch();
 
-                        try (ResultSet rs = psStatus.getGeneratedKeys()) {
-                            rs.next();
+                    try (ResultSet rs = psStatus.getGeneratedKeys()) {
+                        for (QuestStatus qs : questValues) {
+                            if (!rs.next()) {
+                                throw new SQLException("批量插入任务状态后未返回自增ID");
+                            }
+                            long questStatusId = rs.getLong(1);
+
                             for (int mob : qs.getProgress().keySet()) {
                                 psProgress.setInt(1, id);
-                                psProgress.setLong(2, rs.getLong(1));
+                                psProgress.setLong(2, questStatusId);
                                 psProgress.setInt(3, mob);
                                 psProgress.setString(4, qs.getProgress(mob));
                                 psProgress.addBatch();
                             }
-                            psProgress.executeBatch();
 
                             for (int i = 0; i < qs.getMedalMaps().size(); i++) {
                                 psMedal.setInt(1, id);
-                                psMedal.setLong(2, rs.getLong(1));
+                                psMedal.setLong(2, questStatusId);
                                 psMedal.setInt(3, qs.getMedalMaps().get(i));
                                 psMedal.addBatch();
                             }
-                            psMedal.executeBatch();
                         }
                     }
+                    psProgress.executeBatch();
+                    psMedal.executeBatch();
                 }
 
                 FamilyEntry familyEntry = getFamilyEntry(); //save family rep
@@ -8005,6 +8193,8 @@ public class Character extends AbstractCharacterObject {
                 }
 
                 con.commit();
+
+                log.info(I18nUtil.getLogMessage("Character.saveCharToDB.info3"), name);
             } catch (Exception e) {
                 con.rollback();
                 throw e;
@@ -8024,7 +8214,7 @@ public class Character extends AbstractCharacterObject {
     }
 
     public void sendPolice(String text) {
-        final String message = getName() + " received this - " + text;
+        final String message = getName() + " 收到了这个 - " + text;
         if (Server.getInstance().isGmOnline(this.getWorld())) { //Alert and log if a GM is online
             Server.getInstance().broadcastGMMessage(this.getWorld(), PacketCreator.sendYellowTip(message));
         } else { //Auto DC and log if no GM is online
@@ -8594,7 +8784,7 @@ public class Character extends AbstractCharacterObject {
                 }
             }
 
-            dropMessage(6, "EQUIPMENT MERGE operation results:");
+            dropMessage(6, "装备融合操作结果：");
             for (Entry<Equip, List<Pair<StatUpgrade, Integer>>> eqpUpg : equipUpgrades.entrySet()) {
                 List<Pair<StatUpgrade, Integer>> eqpStatups = eqpUpg.getValue();
                 if (!eqpStatups.isEmpty()) {
@@ -9093,7 +9283,11 @@ public class Character extends AbstractCharacterObject {
 
     @Override
     public void sendSpawnData(Client client) {
-        if (!this.isHidden() || client.getPlayer().gmLevel() > 1) {
+        Character viewer = client == null ? null : client.getPlayer();
+        if (viewer == null) {
+            return;
+        }
+        if (!this.isHidden() || viewer.gmLevel() > 1) {
             client.sendPacket(PacketCreator.spawnPlayerMapObject(client, this, false));
 
             if (buffEffects.containsKey(getJobMapChair(job))) { // mustn't effLock, chrLock sendSpawnData
@@ -9392,7 +9586,7 @@ public class Character extends AbstractCharacterObject {
         sendPacket(PacketCreator.sendPolice(I18nUtil.getMessage("Character.autoBan.message1")));  //发送自动封禁提示
         TimerManager.getInstance().schedule(() -> client.disconnect(false, false), 5000);
 
-        Server.getInstance().broadcastGMMessage(this.getWorld(), PacketCreator.serverNotice(6, Character.makeMapleReadable(this.name) + " was autobanned for " + reason));
+        Server.getInstance().broadcastGMMessage(this.getWorld(), PacketCreator.serverNotice(6, Character.makeMapleReadable(this.name) + " 因以下原因被自动封禁: " + reason));
     }
 
     public void block(int reason, int days, String desc) {
@@ -9541,14 +9735,22 @@ public class Character extends AbstractCharacterObject {
             }
 
             ItemInformationProvider ii = ItemInformationProvider.getInstance();
+            List<Equip> candidates = new ArrayList<>();
             for (Item item : getUpgradeableEquipList()) {
                 Equip nEquip = (Equip) item;
                 String itemName = ii.getName(nEquip.getItemId());
-                if (itemName == null) {
+                if (itemName == null || !ii.isUpgradeable(nEquip.getItemId()) || nEquip.isMaxLevel()) {
                     continue;
                 }
+                candidates.add(nEquip);
+            }
 
-                nEquip.gainItemExp(client, expGain);
+            // 每次随机选取一件未满级的装备获得经验，经验按可升级装备数量比例缩减
+            // rate = 可升级装备数 × 15%（无上限），例：1件15%、2件30%、3件45% ...
+            if (!candidates.isEmpty()) {
+                int rate = candidates.size() * 15;
+                expGain = (int) ((long) expGain * rate / 100);
+                candidates.get(Randomizer.nextInt(candidates.size())).gainItemExp(client, expGain);
             }
         }
     }
@@ -10104,7 +10306,8 @@ public class Character extends AbstractCharacterObject {
         }
         if (map == null && showMsg) {
             String msg = I18nUtil.getMessage("Character.Map.Change.message1", Integer.toString(mapid));
-            log.warn(I18nUtil.getLogMessage("Character.Map.Change.warn1"), getName(), getMap().getMapName(), getMapId(),
+            MapleMap currentMap = getMap();
+            log.warn(I18nUtil.getLogMessage("Character.Map.Change.warn1"), getName(), currentMap != null ? currentMap.getMapName() : "null", getMapId(),
                     I18nUtil.getLogMessage("SystemRescue.info.map.message1"),
                     mapid);
             dropMessage(5, msg);                 //聊天窗红色消息提示
@@ -10221,5 +10424,13 @@ public class Character extends AbstractCharacterObject {
     /** 更新全局攻击时间戳，只被正常主动技能调用 */
     public void updateGlobalTime(long now) {
         globalAttackTime = now;
+    }
+
+    public void setTier(BotTier newTier) {
+        this.botTier = BotTier.TierManager.safeTierSet(this.botTier, newTier);
+    }
+
+    public BotTier getTier() {
+        return BotTier.TierManager.getSafeTier(botTier);
     }
 }

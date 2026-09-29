@@ -103,7 +103,9 @@ public class PartySearchCoordinator {
     }
 
     public static boolean isInVicinity(int callerMapid, int calleeMapid) {
-        Set<Integer> vicinityMapids = mapNeighbors.get(calleeMapid);
+        // 取"发起方"地图所在的邻近图簇，判断目标地图是否落在其中。
+        // 原实现取的是 calleeMapid 自己的图簇再判断其是否包含自身，恒为 true，导致就近匹配完全失效。
+        Set<Integer> vicinityMapids = mapNeighbors.get(callerMapid);
 
         if (vicinityMapids != null) {
             return vicinityMapids.contains(calleeMapid);
@@ -224,20 +226,20 @@ public class PartySearchCoordinator {
     }
 
     private void addQueueLeader(Character leader) {
-        leaderQueueRLock.lock();
+        leaderQueueWLock.lock();
         try {
             leaderQueue.add(leader);
         } finally {
-            leaderQueueRLock.unlock();
+            leaderQueueWLock.unlock();
         }
     }
 
     private void removeQueueLeader(Character leader) {
-        leaderQueueRLock.lock();
+        leaderQueueWLock.lock();
         try {
             leaderQueue.remove(leader);
         } finally {
-            leaderQueueRLock.unlock();
+            leaderQueueWLock.unlock();
         }
     }
 
@@ -326,22 +328,22 @@ public class PartySearchCoordinator {
     }
 
     private void registerLongTermPartyLeaders(List<Pair<Character, LeaderSearchMetadata>> recycledLeaders) {
-        leaderQueueRLock.lock();
+        leaderQueueWLock.lock();
         try {
             for (Pair<Character, LeaderSearchMetadata> p : recycledLeaders) {
                 timeoutLeaders.put(p.getLeft(), p.getRight());
             }
         } finally {
-            leaderQueueRLock.unlock();
+            leaderQueueWLock.unlock();
         }
     }
 
     private void unregisterLongTermPartyLeader(Character leader) {
-        leaderQueueRLock.lock();
+        leaderQueueWLock.lock();
         try {
             timeoutLeaders.remove(leader);
         } finally {
-            leaderQueueRLock.unlock();
+            leaderQueueWLock.unlock();
         }
     }
 
@@ -384,7 +386,7 @@ public class PartySearchCoordinator {
             }
         }
 
-        leaderQueueRLock.lock();
+        leaderQueueWLock.lock();
         try {
             leaderQueue.clear();
             leaderQueue.addAll(queuedLeaders.getRight());
@@ -395,7 +397,7 @@ public class PartySearchCoordinator {
                 leaderQueue.addAll(recalledLeaders);
             }
         } finally {
-            leaderQueueRLock.unlock();
+            leaderQueueWLock.unlock();
         }
 
         for (Character leader : searchedLeaders) {
@@ -404,7 +406,7 @@ public class PartySearchCoordinator {
                 addQueueLeader(leader);
             } else {
                 if (leader.isLoggedInWorld()) {
-                    leader.dropMessage(5, "Your Party Search token session has finished as your party reached full capacity.");
+                    leader.dropMessage(5, "你的组队搜索令牌会话已结束，因为你的队伍已满员。");
                 }
                 searchLeaders.remove(leader.getId());
                 searchSettings.remove(leader.getId());
@@ -420,10 +422,10 @@ public class PartySearchCoordinator {
                 if (settings != null) {
                     recycledLeaders.add(new Pair<>(leader, settings));
                     if (GameConfig.getServerBoolean("use_debug") && leader.isGM()) {
-                        leader.dropMessage(5, "Your Party Search token session is now on waiting queue for up to 7 minutes, to get it working right away please stop your Party Search and retry again later.");
+                        leader.dropMessage(5, "你的组队搜索令牌会话现已进入等待队列，最长等待7分钟。想立即生效请停止组队搜索后再重试。");
                     }
                 } else {
-                    leader.dropMessage(5, "Your Party Search token session expired, please stop your Party Search and retry again later.");
+                    leader.dropMessage(5, "你的组队搜索令牌会话已过期，请停止组队搜索后再重试。");
                 }
             }
         }

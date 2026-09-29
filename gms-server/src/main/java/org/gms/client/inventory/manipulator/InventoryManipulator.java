@@ -23,6 +23,7 @@ package org.gms.client.inventory.manipulator;
 
 import org.gms.client.BuffStat;
 import org.gms.client.Character;
+import org.gms.client.Ring;
 import org.gms.client.Client;
 import org.gms.client.inventory.Equip;
 import org.gms.client.inventory.Inventory;
@@ -537,6 +538,10 @@ public class InventoryManipulator {
         Inventory eqpdInv = chr.getInventory(InventoryType.EQUIPPED);
 
         Equip source = (Equip) eqpInv.getItem(src);
+        if (source == null || !ii.canWearEquipment(chr, source, dst)) {
+            c.sendPacket(PacketCreator.enableActions());
+            return;
+        }
         int itemGender = ItemId.getGender(source.getItemId());
         //控制台参数为true时进行校验判断
         if(GameConfig.getServerBoolean("use_equipment_gender_limit") && itemGender != 2 && itemGender != chr.getGender()) {  //判断装备是否要求角色性别
@@ -549,10 +554,6 @@ public class InventoryManipulator {
                     itemGender <= 0 ? I18nUtil.getMessage("Character.Gender0") : I18nUtil.getMessage("Character.Gender1"),
                     source.getItemId()
             );
-            return;
-        }
-        if (source == null || !ii.canWearEquipment(chr, source, dst)) {
-            c.sendPacket(PacketCreator.enableActions());
             return;
         } else if ((ItemId.isExplorerMount(source.getItemId()) && chr.isCygnus()) ||
                 ((ItemId.isCygnusMount(source.getItemId())) && !chr.isCygnus())) {// Adventurer taming equipment    //冒险家驯服设备
@@ -646,7 +647,10 @@ public class InventoryManipulator {
         eqpdInv.lockInventory();
         try {
             if (source.getRingId() > -1) {
-                chr.getRingById(source.getRingId()).equip();
+                Ring ring = chr.getRingById(source.getRingId());
+                if (ring != null) {
+                    ring.equip();
+                }
             }
             chr.equippedItem(source);
             eqpdInv.addItemFromDB(source);
@@ -696,7 +700,10 @@ public class InventoryManipulator {
         eqpdInv.lockInventory();
         try {
             if (source.getRingId() > -1) {
-                chr.getRingById(source.getRingId()).unequip();
+                Ring ring = chr.getRingById(source.getRingId());
+                if (ring != null) {
+                    ring.unequip();
+                }
             }
             chr.unequippedItem(source);
             eqpdInv.removeSlot(src);
@@ -752,13 +759,13 @@ public class InventoryManipulator {
         Inventory inv = chr.getInventory(type);
         Item source = inv.getItem(src);
 
-        if (chr.isGM() && chr.gmLevel() < GameConfig.getServerInt("minimum_gm_level_to_drop")) {
-            chr.message("You cannot drop items at your GM level.");
-            log.info("GM %s tried to drop item id %d", chr.getName(), source.getItemId());
+        if (source == null || chr.getTrade() != null || chr.getMiniGame() != null) { //Only check needed would prob be merchants (to see if the player is in one)
             return;
         }
 
-        if (chr.getTrade() != null || chr.getMiniGame() != null || source == null) { //Only check needed would prob be merchants (to see if the player is in one)
+        if (chr.isGM() && chr.gmLevel() < GameConfig.getServerInt("minimum_gm_level_to_drop")) {
+            chr.message("你的GM等级不允许丢弃物品。");
+            log.info("GM {} tried to drop item id {}", chr.getName(), source.getItemId());
             return;
         }
         int itemId = source.getItemId();

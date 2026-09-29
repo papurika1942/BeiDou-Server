@@ -150,7 +150,7 @@ public class World {
     private final List<Channel> channels = new ArrayList<>();
     private final Map<Integer, Byte> pnpcStep = new HashMap<>();
     private final Map<Integer, Short> pnpcPodium = new HashMap<>();
-    private final Map<Integer, Messenger> messengers = new HashMap<>();
+    private final Map<Integer, Messenger> messengers = new ConcurrentHashMap<>();
     private final AtomicInteger runningMessengerId = new AtomicInteger();
     private final Map<Integer, Family> families = new LinkedHashMap<>();
     private final Map<Integer, Integer> relationships = new HashMap<>();
@@ -452,7 +452,8 @@ public class World {
     public void registerAccountCharacterView(Integer accountId, Character chr) {
         accountCharsLock.lock();
         try {
-            accountChars.get(accountId).put(chr.getId(), chr);
+            accountChars.computeIfAbsent(accountId, ignored -> new TreeMap<>())
+                    .put(chr.getId(), chr);
         } finally {
             accountCharsLock.unlock();
         }
@@ -461,7 +462,10 @@ public class World {
     public void unregisterAccountCharacterView(Integer accountId, Integer chrId) {
         accountCharsLock.lock();
         try {
-            accountChars.get(accountId).remove(chrId);
+            SortedMap<Integer, Character> chars = accountChars.get(accountId);
+            if (chars != null) {
+                chars.remove(chrId);
+            }
         } finally {
             accountCharsLock.unlock();
         }
@@ -788,7 +792,11 @@ public class World {
     }
 
     public Pair<Boolean, Set<Integer>> removeMarriageQueued(int marriageId) {
-        Boolean type = queuedMarriages.remove(marriageId).getLeft().getRight();
+        Pair<Pair<Boolean, Boolean>, Pair<Integer, Integer>> queued = queuedMarriages.remove(marriageId);
+        if (queued == null) {
+            return null;
+        }
+        Boolean type = queued.getLeft().getRight();
         Set<Integer> guests = marriageGuests.remove(marriageId);
 
         return new Pair<>(type, guests);
@@ -1024,8 +1032,10 @@ public class World {
                             }
                         }
                     }
-                    party.setLeader(target);
                 }
+                // 前任队长可能已离线（getPlayer() 返回 null，例如队长掉线时由 removePartyPlayer 触发继任），
+                // 此时仍必须完成队长移交，否则队伍会永久停留在一个已离线的队长身上，所有"仅队长可操作"的流程都会卡死。
+                party.setLeader(target);
                 break;
             default:
                 log.warn("Unhandled updateParty operation: {}", operation.name());
@@ -1132,7 +1142,9 @@ public class World {
                     }
                 } else {
                     Character from = getChannel(fromchannel).getPlayerStorage().getCharacterByName(sender);
-                    from.sendPacket(PacketCreator.messengerChat(sender + " : " + target + " is already using Maple Messenger"));
+                    if (from != null) {
+                        from.sendPacket(PacketCreator.messengerChat(sender + " : " + target + " is already using Maple Messenger"));
+                    }
                 }
             }
         }
@@ -1753,7 +1765,14 @@ public class World {
     }
 
     public void runPlayerHpDecreaseSchedule() {
-        Map<Character, Integer> m = new HashMap<>(playerHpDec);
+        // SynchronizedMap.entrySet() returns the raw inner set, so the copy below iterates an
+        // unsynchronized WeakHashMap view. Concurrent add/remove from map-enter/leave threads (many
+        // more of them once the bot system is loaded) bumped modCount mid-copy, throwing
+        // ConcurrentModificationException. Lock on the map (its own mutex) for the snapshot.
+        Map<Character, Integer> m;
+        synchronized (playerHpDec) {
+            m = new HashMap<>(playerHpDec);
+        }
 
         for (Entry<Character, Integer> e : m.entrySet()) {
             Character chr = e.getKey();

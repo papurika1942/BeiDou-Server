@@ -31,6 +31,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.gms.server.ChatLogger;
 import org.gms.util.PacketCreator;
+import org.gms.extension.event.CharacterChatEvent;
+import org.gms.extension.runtime.HostHooks;
 
 public final class GeneralChatHandler extends AbstractPacketHandler {
     private static final Logger log = LoggerFactory.getLogger(GeneralChatHandler.class);
@@ -55,7 +57,7 @@ public final class GeneralChatHandler extends AbstractPacketHandler {
         } else if (heading != '/') {
             int show = p.readByte();
             if (chr.getMap().isMuted() && !chr.isGM()) {
-                chr.dropMessage(5, "The map you are in is currently muted. Please try again later.");
+                chr.dropMessage(5, "你所在的频道当前处于禁言状态。请稍后再试。");
                 return;
             }
 
@@ -65,6 +67,9 @@ public final class GeneralChatHandler extends AbstractPacketHandler {
             } else {
                 chr.getMap().broadcastGMMessage(PacketCreator.getChatText(chr.getId(), s, chr.getWhiteChat(), show));
                 ChatLogger.log(c, "GM General", s);
+            }
+            if (!HostHooks.isArtificial(chr)) {
+                HostHooks.publish(new CharacterChatEvent(chr, s));
             }
 
             chr.getAutoBanManager().spam(7);

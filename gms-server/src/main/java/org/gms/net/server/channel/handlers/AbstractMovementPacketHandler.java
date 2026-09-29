@@ -156,7 +156,7 @@ public abstract class AbstractMovementPacketHandler extends AbstractPacketHandle
         return res;
     }
 
-    protected void updatePosition(InPacket p, AnimatedMapObject target, int yOffset) throws EmptyMovementException {
+    public static void updatePosition(InPacket p, AnimatedMapObject target, int yOffset) throws EmptyMovementException {
 
         byte numCommands = p.readByte();
         if (numCommands < 1) {
@@ -257,6 +257,19 @@ public abstract class AbstractMovementPacketHandler extends AbstractPacketHandle
                     throw new EmptyMovementException(p);
             }
         }
+    }
+
+    /**
+     * Bot movement decoding. Delegates to {@link #updatePosition(InPacket, AnimatedMapObject, int)}
+     * so bots go through exactly the same decoding, position estimation and
+     * anti-cheat bookkeeping as real players.
+     *
+     * <p>This used to be a copy of updatePosition that silently drifted: relative
+     * moves (19/20/22) never updated the position and teleport/dash/chair/jump-down
+     * were only skipped, leaving bots frozen or desynced.
+     */
+    public static void updatePositionBot(InPacket p, AnimatedMapObject target, int yOffset) throws EmptyMovementException {
+        updatePosition(p, target, yOffset);
     }
 
     /**

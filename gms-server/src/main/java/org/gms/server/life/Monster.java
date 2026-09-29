@@ -42,7 +42,9 @@ import org.gms.constants.skills.NightWalker;
 import org.gms.constants.skills.Priest;
 import org.gms.constants.skills.Shadower;
 import org.gms.constants.skills.WhiteKnight;
+import org.gms.extension.runtime.HostHooks;
 import org.gms.net.packet.Packet;
+import org.gms.net.server.Server;
 import org.gms.net.server.channel.Channel;
 import org.gms.net.server.coordinator.world.MonsterAggroCoordinator;
 import org.gms.net.server.services.task.channel.MobAnimationService;
@@ -105,6 +107,8 @@ public class Monster extends AbstractLoadedLife {
     private boolean fake = false;
     private boolean dropsDisabled = false;
     private final Set<MobSkillId> usedSkills = new HashSet<>();
+    // 技能释放的全局节奏:释放后 interval 内不放行任何技能(官方"放完停歇"),防止多技能怪交替连发
+    private final AtomicLong nextSkillAllowedTime = new AtomicLong(0);
     private final Set<Integer> usedAttacks = new HashSet<>();
     private Set<Integer> calledMobOids = null;
     private WeakReference<Monster> callerMob = new WeakReference<>(null);
@@ -592,6 +596,20 @@ public class Monster extends AbstractLoadedLife {
 
         int membersSize = expMembers.size();
         float participationExp = partyDamage * expPerDmg;
+        // Diagnostic only, and only for parties that actually contain a bot: building
+        // these strings walks the whole party, so it must never run on the normal
+        // kill path. Guarded against an empty participation map.
+        if (log.isDebugEnabled() && !partyParticipation.isEmpty()) {
+            Party participantParty = partyParticipation.keySet().iterator().next().getParty();
+            if (hasArtificialMember(participantParty)) {
+                log.debug("Artificial-party EXP diagnostic map={} mobId={} mobLevel={} mobExp={} partyDamage={} participationExp={} "
+                                + "participants={} partyMembers={} eligible={} totalPartyLevel={}",
+                        getMap().getId(), getId(), getLevel(), getExp(), partyDamage, participationExp,
+                        describeCharacters(partyParticipation.keySet()),
+                        describePartyMembers(participantParty),
+                        describeCharacters(expMembers), totalPartyLevel);
+            }
+        }
 
         // thanks Crypter for reporting an insufficiency on party exp bonuses
         boolean hasPartySharers = membersSize > 1;
@@ -601,6 +619,41 @@ public class Monster extends AbstractLoadedLife {
             distributePlayerExperience(mc, participationExp, partyBonusMod, totalPartyLevel, mc == participationMvp, isWhiteExpGain(mc, personalRatio, sdevRatio), hasPartySharers);
             giveFamilyRep(mc.getFamilyEntry());
         }
+    }
+
+    private static boolean hasArtificialMember(Party party) {
+        if (party == null) {
+            return false;
+        }
+        for (PartyCharacter member : party.getMembers()) {
+            if (member.getPlayer() != null && HostHooks.isArtificial(member.getPlayer())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String describePartyMembers(Party party) {
+        List<String> members = new ArrayList<>();
+        if (party != null) {
+            for (PartyCharacter member : party.getMembers()) {
+                Character player = member.getPlayer();
+                members.add(member.getId() + ":player=" + (player != null)
+                        + ":map=" + (player == null || player.getMap() == null ? -1 : player.getMapId())
+                        + ":logged=" + (player != null && player.isLoggedInWorld())
+                        + ":artificial=" + (player != null && HostHooks.isArtificial(player)));
+            }
+        }
+        return members.toString();
+    }
+
+    private static String describeCharacters(Collection<Character> characters) {
+        List<String> members = new ArrayList<>();
+        for (Character character : characters) {
+            members.add(character.getId() + ":level=" + character.getLevel()
+                    + ":exp=" + character.getExp());
+        }
+        return members.toString();
     }
 
     private void distributeExperience(int killerId) {
@@ -794,7 +847,14 @@ public class Monster extends AbstractLoadedLife {
     public Character killBy(final Character killer) {
         distributeExperience(killer != null ? killer.getId() : 0);
 
-        final Pair<Character, Boolean> lastController = aggroRemoveController();
+        final Pair<Character, Boolean> lastController = aggroRemoveController(false);
+        // 击杀不再向控制器客户端发送 REMOVE_CONTROLLER(会使怪物在攻击特效期间僵住),
+        // 对死亡广播范围外的控制器直接补发死亡包,避免其客户端残留怪物
+        Character lastChrController = lastController.getLeft();
+        if (lastChrController != null && lastChrController.getClient() != null && lastChrController.getMap() == map
+                && lastChrController.getPosition().distanceSq(getPosition()) > MapleMap.getRangedDistance()) {
+            lastChrController.sendPacket(PacketCreator.killMonster(getObjectId(), 1));
+        }
         final List<Integer> toSpawn = this.getRevives();
         if (toSpawn != null) {
             final MapleMap reviveMap = map;
@@ -812,6 +872,7 @@ public class Monster extends AbstractLoadedLife {
             if (toSpawn.size() > 0) {
                 final EventInstanceManager eim = this.getMap().getEventInstance();
 
+                // 复活召唤延迟取 die1 动画时长+500ms,避免死亡动画未播完复活怪就出现
                 TimerManager.getInstance().schedule(() -> {
                     Character controller = lastController.getLeft();
                     boolean aggro = lastController.getRight();
@@ -856,7 +917,7 @@ public class Monster extends AbstractLoadedLife {
                             eim.reviveMonster(mob);
                         }
                     }
-                }, getAnimationTime("die1"));
+                }, getAnimationTime("die1") + 500L);
             }
         } else {  // is this even necessary?
             log.warn("[CRITICAL LOSS] toSpawn is null for {}", getName());
@@ -957,6 +1018,10 @@ public class Monster extends AbstractLoadedLife {
         MonsterListener[] listenersList;
         statiLock.lock();
         try {
+            if (listeners.isEmpty()) {
+                return;
+            }
+
             listenersList = listeners.toArray(new MonsterListener[listeners.size()]);
         } finally {
             statiLock.unlock();
@@ -971,6 +1036,10 @@ public class Monster extends AbstractLoadedLife {
         MonsterListener[] listenersList;
         statiLock.lock();
         try {
+            if (listeners.isEmpty()) {
+                return;
+            }
+
             listenersList = listeners.toArray(new MonsterListener[listeners.size()]);
         } finally {
             statiLock.unlock();
@@ -1474,6 +1543,10 @@ public class Monster extends AbstractLoadedLife {
             return false;
         }
 
+        if (Server.getInstance().getCurrentTime() < nextSkillAllowedTime.get()) {
+            return false;
+        }
+
         if (isReflectSkill(toUse)) {
             if (this.isBuffed(MonsterStatus.WEAPON_REFLECT) || this.isBuffed(MonsterStatus.MAGIC_REFLECT)) {
                 return false;
@@ -1524,6 +1597,15 @@ public class Monster extends AbstractLoadedLife {
         } finally {
             monsterLock.unlock();
         }
+
+        // 动画结束后技能效果实际生效,从那时起算 interval 整体停歇;
+        // WZ 间隔缺失/为0时(如怪物竞技场SPEED),最低停歇5秒
+        long coolTime = skill.getCoolTime();
+        if (coolTime <= 0) {
+            coolTime = 5000;
+        }
+        long animationTime = MonsterInformationProvider.getInstance().getMobSkillAnimationTime(skill);
+        nextSkillAllowedTime.set(Server.getInstance().getCurrentTime() + animationTime + coolTime);
 
         final Monster mons = this;
         MapleMap mmap = mons.getMap();
@@ -1856,9 +1938,52 @@ public class Monster extends AbstractLoadedLife {
 
         Character newControllerWithPuppet = null;
 
-        for (Character chr : getMap().getAllPlayers()) {
-            if (!chr.isHidden() && chr.isLoggedInWorld()) {   // 过滤已断线/awayFromWorld 的幽灵玩家，避免被选为 controller 候选
+        // 原版语义：地图上不存在人工角色(bot)时，隐身玩家永远不作为 controller 候选。
+        // 只有当插件引入了 bot、可能出现"没有任何可见玩家能驱动怪物"的情况时，
+        // 才把隐身玩家列为兜底候选 —— 它持有真实客户端，能发出 MOVE_LIFE；
+        // 而 bot 是 headless，发不出该包，永远不能当选。
+        //
+        // hasArtificial 必须先于候选判定确定，因此需要单独一趟遍历；下面主循环
+        // 依赖它决定隐身玩家是否入候选。两趟都复用同一次 getAllPlayers() 的结果
+        // (该方法每次调用都会加锁并新建 ArrayList)，不要在主循环里再次调用它。
+        boolean hasArtificial = false;
+
+        int minHiddenControlled = Integer.MAX_VALUE;
+        Character hiddenController = null;
+        int minHiddenControlledDead = Integer.MAX_VALUE;
+        Character hiddenControllerDead = null;
+
+        List<Character> players = getMap().getAllPlayers();
+        for (Character chr : players) {
+            if (HostHooks.isArtificial(chr)) {
+                hasArtificial = true;
+            }
+        }
+
+        for (Character chr : players) {
+            // 过滤已断线/awayFromWorld 的幽灵玩家，避免被选为 controller 候选；
+            // headless bot 没有 socket，无法发出 MOVE_LIFE，永远不能当选。
+            if (!HostHooks.isArtificial(chr) && chr.isLoggedInWorld()) {
                 int ctrlMonsSize = chr.getNumControlledMonsters();
+
+                // 可见玩家优先，保持原有的控制器分配顺序。
+                // 隐身玩家仅在该图上确实存在 bot 时才作为兜底候选：此时若没有可见
+                // 玩家，唯一能驱动怪物的真实客户端就是隐身玩家。
+                if (chr.isHidden()) {
+                    if (!hasArtificial) {
+                        continue;
+                    }
+                    if (chr.isAlive()) {
+                        if (ctrlMonsSize < minHiddenControlled) {
+                            minHiddenControlled = ctrlMonsSize;
+                            hiddenController = chr;
+                        }
+                    } else if (ctrlMonsSize < minHiddenControlledDead) {
+                        minHiddenControlledDead = ctrlMonsSize;
+                        hiddenControllerDead = chr;
+                    }
+                    continue;
+                }
 
                 if (isCharacterPuppetInVicinity(chr)) {
                     newControllerWithPuppet = chr;
@@ -1881,8 +2006,12 @@ public class Monster extends AbstractLoadedLife {
             return newControllerWithPuppet;
         } else if (newController != null) {
             return newController;
-        } else {
+        } else if (newControllerDead != null) {
             return newControllerDead;
+        } else if (hiddenController != null) {
+            return hiddenController;
+        } else {
+            return hiddenControllerDead;
         }
     }
 
@@ -1890,6 +2019,16 @@ public class Monster extends AbstractLoadedLife {
      * Removes controllability status from the current controller of this mob.
      */
     public Pair<Character, Boolean> aggroRemoveController() {
+        return aggroRemoveController(true);
+    }
+
+    /**
+     * 移除怪物控制器。击杀路径应传 false,不向控制器客户端发送 REMOVE_CONTROLLER:
+     * 该包会使客户端怪物在攻击特效期间僵住,死亡表现交由 KILL_MONSTER 包处理。
+     * @param announceToController 是否向控制器客户端发送停止控制包
+     * @return 旧控制器及其仇恨状态
+     */
+    public Pair<Character, Boolean> aggroRemoveController(boolean announceToController) {
         Character chrController;
         boolean hadAggro;
 
@@ -1906,7 +2045,7 @@ public class Monster extends AbstractLoadedLife {
         }
 
         if (chrController != null) { // this can/should only happen when a hidden gm attacks the monster
-            if (!this.isFake()) {
+            if (announceToController && !this.isFake()) {
                 chrController.sendPacket(PacketCreator.stopControllingMonster(this.getObjectId()));
             }
             chrController.stopControllingMonster(this);
@@ -1920,6 +2059,9 @@ public class Monster extends AbstractLoadedLife {
      * player controller.
      */
     public void aggroSwitchController(Character newController, boolean immediateAggro) {
+        if (newController != null && HostHooks.isArtificial(newController)) {
+            newController = getNextControllerCandidate();
+        }
         if (aggroUpdateLock.tryLock()) {
             try {
                 Character prevController = getController();

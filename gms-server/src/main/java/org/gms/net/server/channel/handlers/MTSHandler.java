@@ -122,7 +122,7 @@ public final class MTSHandler extends AbstractPacketHandler {
                     return;
                 }
                 if (currentListings > 10) {
-                    c.getPlayer().dropMessage(1, "You already have 10 items up for auction!");
+                    c.getPlayer().dropMessage(1, "你已经有10件物品在拍卖了！");
                     c.sendPacket(getMTS(1, 0, 0));
                     c.sendPacket(PacketCreator.transferInventory(getTransfer(c.getPlayer().getId())));
                     c.sendPacket(PacketCreator.notYetSoldInv(getNotYetSold(c.getPlayer().getId())));
@@ -428,6 +428,17 @@ public final class MTSHandler extends AbstractPacketHandler {
                     if (rs.next()) {
                         int price = rs.getInt("price") + 100 + (int) (rs.getInt("price") * 0.1); // taxes
                         if (c.getPlayer().getCashShop().getCash(CashShop.NX_PREPAID) >= price) { // FIX
+                            // 原子抢占:仅当物品仍未被卖出(transfer=0)时才成交,防止并发购买超卖
+                            boolean acquired;
+                            try (PreparedStatement pse = con.prepareStatement("UPDATE mts_items SET seller = ?, transfer = 1 WHERE id = ? AND transfer = 0")) {
+                                pse.setInt(1, c.getPlayer().getId());
+                                pse.setInt(2, id);
+                                acquired = pse.executeUpdate() > 0;
+                            }
+                            if (!acquired) {
+                                c.sendPacket(PacketCreator.MTSFailBuy());
+                                break;
+                            }
                             boolean alwaysnull = true;
                             for (Channel cserv : Server.getInstance().getAllChannels()) {
                                 Character victim = cserv.getPlayerStorage().getCharacterById(rs.getInt("seller"));
@@ -448,11 +459,6 @@ public final class MTSHandler extends AbstractPacketHandler {
                                         }
                                     }
                                 }
-                            }
-                            try (PreparedStatement pse = con.prepareStatement("UPDATE mts_items SET seller = ?, transfer = 1 WHERE id = ?")) {
-                                pse.setInt(1, c.getPlayer().getId());
-                                pse.setInt(2, id);
-                                pse.executeUpdate();
                             }
                             try (PreparedStatement pse = con.prepareStatement("DELETE FROM mts_cart WHERE itemid = ?")) {
                                 pse.setInt(1, id);
@@ -485,6 +491,17 @@ public final class MTSHandler extends AbstractPacketHandler {
                     if (rs.next()) {
                         int price = rs.getInt("price") + 100 + (int) (rs.getInt("price") * 0.1);
                         if (c.getPlayer().getCashShop().getCash(CashShop.NX_PREPAID) >= price) {
+                            // 原子抢占:仅当物品仍未被卖出(transfer=0)时才成交,防止并发购买超卖
+                            boolean acquired;
+                            try (PreparedStatement pse = con.prepareStatement("UPDATE mts_items SET seller = ?, transfer = 1 WHERE id = ? AND transfer = 0")) {
+                                pse.setInt(1, c.getPlayer().getId());
+                                pse.setInt(2, id);
+                                acquired = pse.executeUpdate() > 0;
+                            }
+                            if (!acquired) {
+                                c.sendPacket(PacketCreator.MTSFailBuy());
+                                break;
+                            }
                             for (Channel cserv : Server.getInstance().getAllChannels()) {
                                 Character victim = cserv.getPlayerStorage().getCharacterById(rs.getInt("seller"));
                                 if (victim != null) {
@@ -502,11 +519,6 @@ public final class MTSHandler extends AbstractPacketHandler {
                                         }
                                     }
                                 }
-                            }
-                            try (PreparedStatement pse = con.prepareStatement("UPDATE mts_items SET seller = ?, transfer = 1 WHERE id = ?")) {
-                                pse.setInt(1, c.getPlayer().getId());
-                                pse.setInt(2, id);
-                                pse.executeUpdate();
                             }
                             try (PreparedStatement pse = con.prepareStatement("DELETE FROM mts_cart WHERE itemid = ?")) {
                                 pse.setInt(1, id);
@@ -797,7 +809,7 @@ public final class MTSHandler extends AbstractPacketHandler {
                 listaitems += " itemid=0 )";
             }
         } else {
-            listaitems = " AND sellername LIKE CONCAT('%','" + search + "', '%')";
+            listaitems = " AND sellername LIKE ?";
         }
         int pages = 0;
         try (Connection con = DatabaseConnection.getConnection()){
@@ -808,13 +820,15 @@ public final class MTSHandler extends AbstractPacketHandler {
                 sql = "SELECT * FROM mts_items WHERE tab = ? " + listaitems + " AND transfer = 0 ORDER BY id DESC LIMIT ?, 16";
             }
             try (PreparedStatement ps = con.prepareStatement(sql)) {
-                ps.setInt(1, tab);
+                int idx = 1;
+                ps.setInt(idx++, tab);
                 if (type != 0) {
-                    ps.setInt(2, type);
-                    ps.setInt(3, page * 16);
-                } else {
-                    ps.setInt(2, page * 16);
+                    ps.setInt(idx++, type);
                 }
+                if (cOi == 0) {
+                    ps.setString(idx++, "%" + search + "%");
+                }
+                ps.setInt(idx, page * 16);
                 ResultSet rs = ps.executeQuery();
                 while (rs.next()) {
                     if (rs.getInt("type") != 1) {

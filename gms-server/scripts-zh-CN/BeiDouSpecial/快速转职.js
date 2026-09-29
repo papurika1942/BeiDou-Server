@@ -81,7 +81,23 @@ function action(mode, type, selection) {
             var changeto = selection;
             var jobid = cm.getJobId();
             if (jobid % 1000 == 0) {
-                if (cm.getChar().getLevel() >= 8 && changeto == 200 || cm.getPlayer().getLevel() >= 10) {
+                // 职业白名单校验(仅新手一转):防止客户端传入任意职业ID。
+                // 二/三/四转的目标职业由上方菜单生成(二转110/120/130等、三/四转jobid+1),
+                // 不在本白名单内,故白名单只包住一转分支,避免拦截正常进阶转职。
+                var jobWhitelist = [100, 200, 300, 400, 500, 1100, 1200, 1300, 1400, 1500, 2100];
+                var isValidJob = false;
+                for (var wi = 0; wi < jobWhitelist.length; wi++) {
+                    if (changeto == jobWhitelist[wi]) {
+                        isValidJob = true;
+                        break;
+                    }
+                }
+                if (!isValidJob) {
+                    cm.sendOk("无效的职业选择，请重新选择！");
+                    cm.dispose();
+                    return;
+                }
+                if ((cm.getChar().getLevel() >= 8 && changeto == 200) || (cm.getPlayer().getLevel() >= 10 && changeto != 200)) {
                     cm.changeJobById(changeto);
                     cm.dropMessage(5,"【转职系统】玩家 [" + cm.getPlayer() + "] 快速一转");
                 } else {
@@ -104,7 +120,7 @@ function action(mode, type, selection) {
                     cm.sendOk("你还没有满足转职条件！");
                 }
             } else if (jobid % 10 == 1) {
-                if (jobid / 1000 >= 1 && jobid / 1000 < 2) {
+                if (Math.floor(jobid / 1000) === 1) {
                     cm.sendOk("骑士团共3转 已完成！");
                 } else if (cm.getChar().getLevel() >= 120) {
                     cm.changeJobById(changeto);

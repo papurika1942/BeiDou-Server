@@ -145,7 +145,6 @@ public final class Channel {
 
             if (Server.getInstance().isOnline()) {  // postpone event loading to improve boot time... thanks Riizade, daronhudson for noticing slow startup times
                 eventSM = new EventScriptManager(this, getEvents());
-                eventSM.init();
             } else {
                 String[] ev = {"0_EXAMPLE"};
                 eventSM = new EventScriptManager(this, ev);
@@ -196,8 +195,10 @@ public final class Channel {
             disconnectAwayPlayers();
             players.disconnectAll();
 
-            eventSM.dispose();
-            eventSM = null;
+            if (eventSM != null) {
+                eventSM.dispose();
+                eventSM = null;
+            }
 
             mapManager.dispose();
             mapManager = null;
@@ -234,7 +235,7 @@ public final class Channel {
         closeChannelServices();
     }
 
-    private void closeAllMerchants() {
+    public void closeAllMerchants() {
         List<HiredMerchant> merchs;
 
         merchWlock.lock();
@@ -291,7 +292,7 @@ public final class Channel {
     }
 
     public int getChannelCapacity() {
-        return (int) (Math.ceil(((float) players.getAllCharacters().size() / GameConfig.getServerInt("channel_capacity")) * 800));
+        return (int) (Math.ceil(((float) players.getSize() / GameConfig.getServerInt("channel_capacity")) * 800));
     }
 
     public void broadcastPacket(Packet packet) {
@@ -773,9 +774,12 @@ public final class Channel {
 
         Pair<Integer, Integer> coupleId = wserv.getMarriageQueuedCouple(ret);
         Pair<Boolean, Set<Integer>> typeGuests = wserv.removeMarriageQueued(ret);
+        if (coupleId == null || typeGuests == null) {
+            return null;
+        }
 
         Pair<String, String> couple = new Pair<>(Character.getNameById(coupleId.getLeft()), Character.getNameById(coupleId.getRight()));
-        wserv.dropMessage(6, couple.getLeft() + " and " + couple.getRight() + "'s wedding is going to be started at " + (cathedral ? "Cathedral" : "Chapel") + " on Channel " + channel + ".");
+        wserv.dropMessage(6, couple.getLeft() + " 和 " + couple.getRight() + " 的婚礼将于 " + (cathedral ? "大教堂" : "小教堂") + " 在频道 " + channel + " 开始。");
 
         return new Pair<>(typeGuests.getLeft(), new Pair<>(ret, typeGuests.getRight()));
     }
@@ -966,15 +970,15 @@ public final class Channel {
         switch (mode) {
             case 2:
                 int hours = (int) ((leftTime / (HOURS.toMillis(1))));
-                str.append(hours + " hours, ");
+                str.append(hours).append(I18nUtil.getMessage("Channel.getTimeLeft.hours"));
 
             case 1:
                 int minutes = (int) ((leftTime / (MINUTES.toMillis(1))) % 60);
-                str.append(minutes + " minutes, ");
+                str.append(minutes).append(I18nUtil.getMessage("Channel.getTimeLeft.minutes"));
 
             default:
                 int seconds = (int) (leftTime / SECONDS.toMillis(1)) % 60;
-                str.append(seconds + " seconds");
+                str.append(seconds).append(I18nUtil.getMessage("Channel.getTimeLeft.seconds"));
         }
 
         return str.toString();
@@ -1008,12 +1012,12 @@ public final class Channel {
                 }
             }
 
-            String venue = (cathedral ? "Cathedral" : "Chapel");
+            String venue = (cathedral ? I18nUtil.getMessage("Channel.weddingReservation.venue.cathedral") : I18nUtil.getMessage("Channel.weddingReservation.venue.chapel"));
             if (resStatus == 0) {
-                return venue + " - RIGHT NOW";
+                return venue + " - " + I18nUtil.getMessage("Channel.weddingReservation.rightNow");
             }
 
-            return venue + " - " + getTimeLeft(ongoingStartTime + MINUTES.toMillis((long) resStatus * GameConfig.getServerLong("wedding_reservation_interval"))) + " from now";
+            return venue + " - " + getTimeLeft(ongoingStartTime + MINUTES.toMillis((long) resStatus * GameConfig.getServerLong("wedding_reservation_interval"))) + I18nUtil.getMessage("Channel.weddingReservation.fromNow");
         } finally {
             lock.unlock();
         }

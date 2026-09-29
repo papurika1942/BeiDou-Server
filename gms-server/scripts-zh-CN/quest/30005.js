@@ -22,15 +22,51 @@ AllowFunction-could use directly
 
 var status = -1; 
 var text;
+var pendingPeace = false; // 已弹出安抚对话框，等玩家点确定后收尾
+
+// 不在开放范围时，发放安慰奖励并强制完成，以刷新任务的间隔时间，避免灯泡反复弹出
+function sendPeaceFarewell(words)
+{
+	pendingPeace = true;
+	qm.sendOk("猴子森林的骚动已经平息，感谢你为冒险岛世界带来的和平。\r\n\r\n" + words + "\r\n\r\n这是大家的一点心意，请收下 #b1000#k 金币。");
+}
+
 //Start
 function start(mode, type, selection)
 {
 	if (CheckStatus(mode))
 	{
+		// 玩家点掉了安抚对话框，发放奖励并强制完成任务
+		if (pendingPeace)
+		{
+			qm.gainMeso(1000);
+			qm.forceCompleteQuest();
+			qm.dispose();
+			return;
+		}
+		// 检查任务是否已开始
+		if (qm.isQuestStarted(30005))
+		{
+			qm.sendOk("时间不多了! 请尽快帮我消灭200只! ");
+			qm.dispose();
+			return;
+		}
 	    if (status == 0)
 	    {
-			//第一层对话
-			qm.sendNext("大事不好了，邪恶的气息正在侵袭冒险岛世界，勇士，请听我说...");
+			// 只有维多利亚岛(金银岛)且等级在 39~40 之间才走正常流程，其余情况直接安抚收尾
+			if (qm.getMapId() < 100000000 || qm.getMapId() >= 200000000)
+			{
+				sendPeaceFarewell("你的旅程已经走得很远了，无论身在何方，都请常回来看看。");
+			}
+			else if (qm.getLevel() < 39 || qm.getLevel() > 40)
+			{
+				sendPeaceFarewell("如今的你已经足够强大，不必再为这场骚动奔波，去迎接更广阔的冒险吧。");
+			}
+			else
+			{
+				//第一层对话
+				qm.sendNext("大事不好了，邪恶的气息正在侵袭冒险岛世界，勇士，请听我说...");
+			}
 	    }
 		else if (status == 1 )
 		{
@@ -49,13 +85,13 @@ function start(mode, type, selection)
 		}
 		else if (status == 2 )
 		{
-			qm.sendAcceptDecline("勇士，我知道您很强大，还请#r帮帮我们，我可以送您过去！！#k");
+			qm.sendAcceptDecline("勇士，我知道您很强大，还请#r帮帮我们！！#k");
 		}
 		else if (status == 3)
 		{
-			if (qm.getLevel() < 40)
+			if (qm.getLevel() < 39)
 			{
-				qm.sendOk("还是等你40级以后再去吧，你现在去会死翘翘的。");
+				qm.sendOk("还是等你39级以后再去吧，你现在去会死翘翘的。");
 				qm.dispose();
 			}
 			else if(qm.getMapId() == 300000012) {
@@ -63,7 +99,7 @@ function start(mode, type, selection)
 				qm.dispose();
 			} else
 			{
-				qm.warp(100040103);
+				//qm.warp(100040103);
 			    qm.sendOk("谢谢您，请帮我消灭200只，但愿这样可以让冒险岛世界的黑暗气息能有效地被遏制一些。");
 			    qm.forceStartQuest(); 
                 qm.dispose();				
@@ -80,7 +116,10 @@ function end(mode, type, selection)
 	    if (status == 0)
 	    {
 			//第一层对话
-            qm.sendOk("天呐您这么快就消灭了200只，冒险岛世界有救了！谢谢您~！");		
+            qm.sendOk("天呐您这么快就消灭了200只，冒险岛世界有救了！谢谢您~！");
+			qm.gainExp(2000);
+			qm.gainMeso(20000);
+			qm.gainFame(1);
 			qm.forceCompleteQuest();
 	    }
 		else

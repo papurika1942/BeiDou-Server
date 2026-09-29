@@ -56,7 +56,7 @@ function action(mode, type, selection) {
                     eim.setIntProperty("npcShocked", 1);
 
                     cm.sendNext("哦？你给我信？像这样的时候，应该是什么…… 哇！伙计们，有大事发生了。集合起来，从现在开始，事情会比以往更加艰难！");
-                    eim.dropMessage(6, "Juliet seemed very much in shock after reading Romeo's Letter.");
+                    eim.dropMessage(6, "朱丽叶看了罗密欧的信，似乎很震惊。");
 
                     cm.dispose();
 
@@ -76,7 +76,7 @@ function action(mode, type, selection) {
                     if (cm.isEventLeader()) {
                         cm.gainItem(4001134, -1);
                         cm.gainItem(4001135, -1);
-                        cm.sendNext("太好了！你手头上有艾尔卡德诺和泽纳米斯特的文件。现在我们可以继续了。");
+                        cm.sendNext("太好了！你手头上有艾尔卡德诺和泽努米斯特的文件。现在我们可以继续了。");
 
                         eim.showClearEffect();
                         eim.giveEventPlayersStageReward(4);

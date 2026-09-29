@@ -45,6 +45,7 @@ import org.gms.server.CashShop;
 import org.gms.server.CashShop.CashItemFactory;
 import org.gms.server.ItemInformationProvider;
 import org.gms.service.NoteService;
+import org.gms.util.I18nUtil;
 import org.gms.util.PacketCreator;
 import org.gms.util.Pair;
 
@@ -210,6 +211,10 @@ public final class CashOperationHandler extends AbstractPacketHandler {
                             return;
                         }
                         int type = (cItem.getItemId() - 9110000) / 1000;
+                        if (type < 1 || type > 4) {
+                            c.enableCSActions();
+                            return;
+                        }
                         if (!canBuy(chr, cItem, cs.getCash(cash))) {
                             c.enableCSActions();
                             return;
@@ -284,7 +289,7 @@ public final class CashOperationHandler extends AbstractPacketHandler {
                         return;
                     }
                     if (!c.canGainCharacterSlot()) {
-                        chr.dropMessage(1, "You have already used up all 12 extra character slots.");
+                        chr.dropMessage(1, "你已经用完了全部12个额外的角色槽位。");
                         c.enableCSActions();
                         return;
                     }
@@ -352,13 +357,18 @@ public final class CashOperationHandler extends AbstractPacketHandler {
                         String recipientName = p.readString();
                         String text = p.readString();
                         ModifiedCashItemDO itemRing = CashItemFactory.getItem(SN);
+                        if (!canBuy(chr, itemRing, cs.getCash(toCharge))) {
+                            chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest"));
+                            c.enableCSActions();
+                            return;
+                        }
                         Character partner = c.getChannelServer().getPlayerStorage().getCharacterByName(recipientName);
                         if (partner == null) {
                             chr.sendPacket(PacketCreator.serverNotice(1, "找不到你指定的对象。\r\n请确认对方在线且与你处于同一频道。"));
                         } else {
 
                           /*  if (partner.getGender() == chr.getGender()) {
-                                chr.dropMessage(5, "You and your partner are the same gender, please buy a friendship ring.");
+                                chr.dropMessage(5, "你和你的伴侣性别相同，请购买友情戒指。");
                                 c.enableCSActions();
                                 return;
                             }*/ //Gotta let them faggots marry too, hence why this is commented out <3 
@@ -418,6 +428,11 @@ public final class CashOperationHandler extends AbstractPacketHandler {
                         p.skip(3); //0s
                         int snID = p.readInt();
                         ModifiedCashItemDO itemRing = CashItemFactory.getItem(snID);
+                        if (!canBuy(chr, itemRing, cs.getCash(payment))) {
+                            chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest"));
+                            c.enableCSActions();
+                            return;
+                        }
                         String sentTo = p.readString();
                         String text = p.readString();
                         Character partner = c.getChannelServer().getPlayerStorage().getCharacterByName(sentTo);

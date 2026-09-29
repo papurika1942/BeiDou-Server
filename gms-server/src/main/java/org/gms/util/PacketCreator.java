@@ -45,12 +45,14 @@ import org.gms.client.inventory.ModifyInventory;
 import org.gms.client.inventory.Pet;
 import org.gms.client.keybind.KeyBinding;
 import org.gms.client.keybind.QuickslotBinding;
+import org.gms.constants.game.CharacterStance;
 import org.gms.constants.game.CommodityFlag;
 import org.gms.dao.entity.ModifiedCashItemDO;
 import org.gms.model.pojo.NewYearCardRecord;
 import org.gms.client.status.MonsterStatus;
 import org.gms.client.status.MonsterStatusEffect;
 import org.gms.config.GameConfig;
+import org.gms.extension.runtime.HostHooks;
 import org.gms.constants.game.ExpTable;
 import org.gms.constants.game.GameConstants;
 import org.gms.constants.id.ItemId;
@@ -1973,7 +1975,19 @@ public class PacketCreator {
             p.writeByte(chr.getStance());
         }
 
-        p.writeShort(0);//chr.getFh()
+        // fh：SPAWN_PLAYER 的 foothold 字段会驱动远程角色的绘制层级
+        // （FootholdTree_LookupFootholdById -> CUser+0x130/+0x134）。发 0 时查找失败，远程角色被降到
+        // 默认最低层、被前景装饰/绳索遮挡。
+        // 仅对“人造角色（bot）”填真实 foothold ID：真人客户端会持续上报自己的移动，层级本来不会坏，
+        // 不动真人的包（保持其现有行为）；bot 进图后本引擎不再重算其层号，只能靠这一处修。
+        // 又因同一字段也用于“位置吸附”、且进图路径只有地面分支（无绳索/空中分支），bot 不在实地
+        // （爬梯/绳索、跳跃、游泳）时脚下往往仍有地面，填它的 id 会被进图观察者吸附到地面 —— 故仅
+        // “站在地面”时发 id，其余状态发 0，观察者随后靠移动包纠正。
+        int stance = chr.getStance();
+        boolean onFoot = !CharacterStance.isClimbing(stance)
+                && !CharacterStance.isJumping(stance)
+                && !CharacterStance.isSwimming(stance);
+        p.writeShort(HostHooks.isArtificial(chr) && onFoot ? chr.getFootholdId() : 0);
         p.writeByte(0);
         Pet[] pet = chr.getPets();
         for (byte i = 0; i < 3; i++) {
@@ -2346,6 +2360,20 @@ public class PacketCreator {
         if (charge != -1) {
             p.writeInt(charge);
         }
+        return p;
+    }
+
+    /**
+     * The energy attack (能量攻击, 0xBD) - the packet a client's touch attack is echoed back as.
+     *
+     * <p>A client sends its charged touch (Energy Charge / Body Pressure) as TOUCH_MONSTER_ATTACK
+     * (0x2F) and the server answers with this opcode. The four attack packets carry the same body,
+     * so this is {@link #addAttackBody} behind a different header, exactly as the v83 protocol has
+     * it - the client then plays the real strike pose instead of only watching the mob's HP drop.</p>
+     */
+    public static Packet energyAttack(Character chr, int skill, int skilllevel, int stance, int numAttackedAndDamage, Map<Integer, List<Integer>> damage, int speed, int direction, int display) {
+        final OutPacket p = OutPacket.create(SendOpcode.ENERGY_ATTACK);
+        addAttackBody(p, chr, skill, skilllevel, stance, numAttackedAndDamage, 0, damage, speed, direction, display);
         return p;
     }
 
@@ -3158,13 +3186,40 @@ public class PacketCreator {
         return p;
     }
 
-    public static Packet getPlayerShopRemoveVisitor(int slot) {
-        OutPacket p = OutPacket.create(SendOpcode.PLAYER_INTERACTION);
+    // Second payload byte of a player-shop EXIT (0x0A) when a visitor leaves. The leaver never
+    // receives this packet, so an ordinary departure carries no notice text (the client shows an
+    // empty CUtilDlg::Notice only for the leaver's own seat, which is never addressed here).
+    public static final int PLAYER_SHOP_LEAVE_USER_REQUEST = 0;
+    /** Guest's own seat when the owner closes the shop; text: "The shop is closed." (083 StringPool 417). */
+    public static final int PLAYER_SHOP_LEAVE_HOST_OUT = 3;
+    /** Banned guest's own seat; text: "The user has been banned." (083 StringPool 430). */
+    public static final int PLAYER_SHOP_LEAVE_BANNED = 5;
+
+    /**
+     * Player-shop visitor-leave notification, sent to the players still inside the shop.
+     *
+     * <p>Payload is {@code [seat:1][reason:1]}. The client (GMS083 {@code CPersonalShopDlg::OnLeave})
+     * reads exactly those two bytes and, only when {@code seat} equals its OWN position, closes the
+     * shop window and pops {@code CUtilDlg::Notice(reasonText)}. Therefore {@code seat} must name the
+     * seat whose occupant left - never the receiver's own seat, or the receiver believes it is the
+     * one leaving and the window closes with a notice.
+     *
+     * <p>{@code reason} selects the notice text, mirroring the client's leave-reason switch
+     * (083 StringPool ids in parentheses): 1 (401), 3 (417), 5 (430), 6 (5569),
+     * 14 (418, "The items are out of stock."), 15 (431, time-limit ban). Any other value -
+     * including {@link #PLAYER_SHOP_LEAVE_USER_REQUEST} - has no text.
+     */
+    public static Packet getPlayerShopRemoveVisitor(int slot, int reason) {
+        final OutPacket p = OutPacket.create(SendOpcode.PLAYER_INTERACTION);
         p.writeByte(PlayerInteractionHandler.Action.EXIT.getCode());
-        if (slot != 0) {
-            p.writeShort(slot);
-        }
+        p.writeByte(slot);
+        p.writeByte(reason);
         return p;
+    }
+
+    /** Script-facing single-argument overload; see {@link #getPlayerShopRemoveVisitor(int, int)}. */
+    public static Packet getPlayerShopRemoveVisitor(int slot) {
+        return getPlayerShopRemoveVisitor(slot, PLAYER_SHOP_LEAVE_USER_REQUEST);
     }
 
     public static Packet getTradePartnerAdd(Character chr) {
@@ -5199,11 +5254,12 @@ public class PacketCreator {
         p.writeString(hm.getDescription());
         p.writeByte(0x10); //TODO SLOTS, which is 16 for most stores...slotMax
         p.writeInt(hm.isOwner(chr) ? chr.getMerchantMeso() : chr.getMeso());
-        p.writeByte(hm.getItems().size());
-        if (hm.getItems().isEmpty()) {
+        List<PlayerShopItem> items = hm.getItems();
+        p.writeByte(items.size());
+        if (items.isEmpty()) {
             p.writeByte(0);//Hmm??
         } else {
-            for (PlayerShopItem item : hm.getItems()) {
+            for (PlayerShopItem item : items) {
                 p.writeShort(item.getBundles());
                 p.writeShort(item.getItem().getQuantity());
                 p.writeInt(item.getPrice());
@@ -5217,8 +5273,9 @@ public class PacketCreator {
         final OutPacket p = OutPacket.create(SendOpcode.PLAYER_INTERACTION);
         p.writeByte(PlayerInteractionHandler.Action.UPDATE_MERCHANT.getCode());
         p.writeInt(hm.isOwner(chr) ? chr.getMerchantMeso() : chr.getMeso());
-        p.writeByte(hm.getItems().size());
-        for (PlayerShopItem item : hm.getItems()) {
+        List<PlayerShopItem> items = hm.getItems();
+        p.writeByte(items.size());
+        for (PlayerShopItem item : items) {
             p.writeShort(item.getBundles());
             p.writeShort(item.getItem().getQuantity());
             p.writeInt(item.getPrice());

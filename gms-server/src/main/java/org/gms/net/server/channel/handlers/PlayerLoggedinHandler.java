@@ -118,6 +118,7 @@ public final class PlayerLoggedinHandler extends AbstractPacketHandler {
         if (!c.tryacquireClient()) {
             // thanks MedicOP for assisting on concurrency protection here
             c.sendPacket(PacketCreator.getAfterLoginError(10));
+            return;
         }
 
         try {
@@ -160,12 +161,14 @@ public final class PlayerLoggedinHandler extends AbstractPacketHandler {
 
             boolean newcomer = false;
             if (player == null) {
+                long loadStart = System.currentTimeMillis();
                 try {
                     player = Character.loadCharFromDB(cid, c, true);
                     newcomer = true;
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
+                log.info(I18nUtil.getLogMessage("PlayerLoggedinHandler.timing.info1", cid, System.currentTimeMillis() - loadStart));
 
                 if (player == null) { //If you are still getting null here then please just uninstall the game >.>, we dont need you fucking with the logs
                     c.disconnect(true, false);

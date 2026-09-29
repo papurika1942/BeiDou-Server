@@ -92,7 +92,17 @@ public class FredrickProcessor {
         return 0x0;
     }
 
+    /**
+     * 计算从 then 到 timeNow 经过的天数。
+     * <p>
+     * then 为 null 时（例如 lastLogoutTime 从未写入的老数据）返回 0，即按"尚未经过时间"处理：
+     * 宁可少发一次提醒、不清理，也不要因为一条脏数据把玩家寄存在弗兰德里处的物品判为过期。
+     */
     public static int timestampElapsedDays(Timestamp then, long timeNow) {
+        if (then == null) {
+            return 0;
+        }
+
         return (int) ((timeNow - then.getTime()) / DAYS.toMillis(1));
     }
 
@@ -173,6 +183,15 @@ public class FredrickProcessor {
                     Timestamp ts = rs.getTimestamp("timestamp");
                     int daynotes = Math.min(dailyReminders.length - 1, rs.getInt("daynotes"));
 
+                    // LEFT JOIN 未命中说明 fredstorage 里是一条孤儿行：对应的角色已经不存在了
+                    // （例如早期版本删角色时没连带清理 fredstorage）。此时 name 为 null，
+                    // 直接当作过期清理掉，顺便把残留的雇佣商店物品和金币记录一并回收。
+                    String name = rs.getString("name");
+                    if (name == null) {
+                        expiredCids.add(new Pair<>(cid, world));
+                        continue;
+                    }
+
                     int elapsedDays = timestampElapsedDays(ts, curTime);
                     if (elapsedDays > 100) {
                         expiredCids.add(new Pair<>(cid, world));
@@ -186,10 +205,11 @@ public class FredrickProcessor {
                             } while (elapsedDays >= notifDay);
 
                             Timestamp logoutTs = rs.getTimestamp("lastLogoutTime");
+                            // lastLogoutTime 为 NULL 时 timestampElapsedDays 返回 0（视为刚刚活跃），
+                            // 因此永远不会命中 inactivityDays >= 7 的静默分支，提醒照常发出。
                             int inactivityDays = timestampElapsedDays(logoutTs, curTime);
 
                             if (inactivityDays < 7 || daynotes >= dailyReminders.length - 1) {  // don't spam inactive players
-                                String name = rs.getString("name");
                                 notifCids.add(new Pair<>(new Pair<>(cid, name), daynotes));
                             }
                         }
@@ -284,7 +304,7 @@ public class FredrickProcessor {
                 // (HiredMerchantRequest) closes the store first and sets hasMerchant=false, so it is unaffected.
                 HiredMerchant active = c.getWorldServer().getHiredMerchant(chr.getId());
                 if (chr.hasMerchant() || (active != null && active.isOwner(chr))) {
-                    chr.dropMessage(1, "Please close your hired merchant before retrieving stored items.");
+                    chr.dropMessage(1, "取回存放物品前，请先关闭你的雇佣商店。");
                     chr.sendPacket(PacketCreator.enableActions());
                     return;
                 }
@@ -299,28 +319,29 @@ public class FredrickProcessor {
                         return;
                     }
 
+                    if (!deleteFredrickItems(chr.getId())) {
+                        chr.message("发生了未知错误。");
+                        return;
+                    }
+
                     chr.withdrawMerchantMesos();
 
-                    if (deleteFredrickItems(chr.getId())) {
-                        HiredMerchant merchant = chr.getHiredMerchant();
+                    HiredMerchant merchant = chr.getHiredMerchant();
 
-                        // 当前关联也可能是正在访问的其他玩家商店，只清理领取者自己的货架。
-                        if (merchant != null && merchant.isOwner(chr)) {
-                            merchant.clearItems();
-                        }
-
-                        for (Pair<Item, InventoryType> it : items) {
-                            Item item = it.getLeft();
-                            InventoryManipulator.addFromDrop(chr.getClient(), item, false);
-                            String itemName = ItemInformationProvider.getInstance().getName(item.getItemId());
-                            log.debug("Chr {} gained {}x {} ({})", chr.getName(), item.getQuantity(), itemName, item.getItemId());
-                        }
-
-                        chr.sendPacket(PacketCreator.fredrickMessage((byte) 0x1E));
-                        removeFredrickLog(chr.getId());
-                    } else {
-                        chr.message("An unknown error has occured.");
+                    // 当前关联也可能是正在访问的其他玩家商店，只清理领取者自己的货架。
+                    if (merchant != null && merchant.isOwner(chr)) {
+                        merchant.clearItems();
                     }
+
+                    for (Pair<Item, InventoryType> it : items) {
+                        Item item = it.getLeft();
+                        InventoryManipulator.addFromDrop(chr.getClient(), item, false);
+                        String itemName = ItemInformationProvider.getInstance().getName(item.getItemId());
+                        log.debug("Chr {} gained {}x {} ({})", chr.getName(), item.getQuantity(), itemName, item.getItemId());
+                    }
+
+                    chr.sendPacket(PacketCreator.fredrickMessage((byte) 0x1E));
+                    removeFredrickLog(chr.getId());
                 } catch (SQLException ex) {
                     ex.printStackTrace();
                 }

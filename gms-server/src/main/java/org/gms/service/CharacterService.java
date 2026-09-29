@@ -39,6 +39,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.sql.Connection;
 import java.sql.Date;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.*;
 
@@ -51,14 +52,22 @@ import static org.gms.dao.entity.table.BbsThreadsDOTableDef.BBS_THREADS_D_O;
 import static org.gms.dao.entity.table.BuddiesDOTableDef.BUDDIES_D_O;
 import static org.gms.dao.entity.table.CharactersDOTableDef.CHARACTERS_D_O;
 import static org.gms.dao.entity.table.CooldownsDOTableDef.COOLDOWNS_D_O;
+import static org.gms.dao.entity.table.DueyitemsDOTableDef.DUEYITEMS_D_O;
+import static org.gms.dao.entity.table.DueypackagesDOTableDef.DUEYPACKAGES_D_O;
 import static org.gms.dao.entity.table.EventstatsDOTableDef.EVENTSTATS_D_O;
 import static org.gms.dao.entity.table.ExtendValueDOTableDef.EXTEND_VALUE_D_O;
 import static org.gms.dao.entity.table.FamelogDOTableDef.FAMELOG_D_O;
 import static org.gms.dao.entity.table.FamilyCharacterDOTableDef.FAMILY_CHARACTER_D_O;
 import static org.gms.dao.entity.table.FredstorageDOTableDef.FREDSTORAGE_D_O;
+import static org.gms.dao.entity.table.GiftsDOTableDef.GIFTS_D_O;
 import static org.gms.dao.entity.table.KeymapDOTableDef.KEYMAP_D_O;
+import static org.gms.dao.entity.table.MarriagesDOTableDef.MARRIAGES_D_O;
 import static org.gms.dao.entity.table.MonsterbookDOTableDef.MONSTERBOOK_D_O;
+import static org.gms.dao.entity.table.NotesDOTableDef.NOTES_D_O;
 import static org.gms.dao.entity.table.PlayerdiseasesDOTableDef.PLAYERDISEASES_D_O;
+import static org.gms.dao.entity.table.PlayernpcsDOTableDef.PLAYERNPCS_D_O;
+import static org.gms.dao.entity.table.PlayernpcsEquipDOTableDef.PLAYERNPCS_EQUIP_D_O;
+import static org.gms.dao.entity.table.ReportsDOTableDef.REPORTS_D_O;
 import static org.gms.dao.entity.table.SavedlocationsDOTableDef.SAVEDLOCATIONS_D_O;
 import static org.gms.dao.entity.table.ServerQueueDOTableDef.SERVER_QUEUE_D_O;
 import static org.gms.dao.entity.table.SkillmacrosDOTableDef.SKILLMACROS_D_O;
@@ -108,6 +117,14 @@ public class CharacterService {
     private final HwidaccountsMapper hwidaccountsMapper;
     private final IpbansMapper ipbansMapper;
     private final MacbansMapper macbansMapper;
+    private final PlayernpcsMapper playernpcsMapper;
+    private final PlayernpcsEquipMapper playernpcsEquipMapper;
+    private final DueypackagesMapper dueypackagesMapper;
+    private final DueyitemsMapper dueyitemsMapper;
+    private final ReportsMapper reportsMapper;
+    private final GiftsMapper giftsMapper;
+    private final MarriagesMapper marriagesMapper;
+    private final NotesMapper notesMapper;
 
     public CharactersDO findById(int id) {
         return charactersMapper.selectOneById(id);
@@ -118,7 +135,12 @@ public class CharacterService {
     }
 
     public Page<ChrOnlineListRtnDTO> getChrOnlineList(ChrOnlineListReqDTO request) {
-        Collection<Character> chrList = Server.getInstance().getWorld(request.getWorld()).getPlayerStorage().getAllCharacters();
+        World world = Server.getInstance().getWorld(request.getWorld());
+        if (world == null) {
+            return BasePageUtil.create(List.<Character>of(), request)
+                    .page(chr -> ChrOnlineListRtnDTO.builder().build());
+        }
+        Collection<Character> chrList = world.getPlayerStorage().getAllCharacters();
         return BasePageUtil.create(chrList, request)
                 .filter(chr -> (Objects.isNull(request.getId()) || Objects.equals(chr.getId(), request.getId()))
                         && (RequireUtil.isEmpty(request.getName()) || chr.getName().contains(request.getName()))
@@ -146,10 +168,12 @@ public class CharacterService {
             extendValueMapper.update(data);
         }
 
-        Character character = getCharacter(data);
-        character.resetPlayerRates();
-        character.setWorldRates();
-        character.setCouponRates();
+        Character character = findOnlineCharacter(data);
+        if (character != null) {
+            character.resetPlayerRates();
+            character.setWorldRates();
+            character.setCouponRates();
+        }
     }
 
     public void resetRate(ExtendValueDO data) {
@@ -158,10 +182,12 @@ public class CharacterService {
                 .where(EXTEND_VALUE_D_O.EXTEND_ID.eq(data.getExtendId()))
                 .and(EXTEND_VALUE_D_O.EXTEND_TYPE.eq(ExtendType.CHARACTER_EXTEND.getType()))
                 .and(EXTEND_VALUE_D_O.EXTEND_NAME.eq(data.getExtendName())));
-        Character character = getCharacter(data);
-        character.resetPlayerRates();
-        character.setWorldRates();
-        character.setCouponRates();
+        Character character = findOnlineCharacter(data);
+        if (character != null) {
+            character.resetPlayerRates();
+            character.setWorldRates();
+            character.setCouponRates();
+        }
     }
 
     public void resetRates(ExtendValueDO data) {
@@ -170,10 +196,12 @@ public class CharacterService {
                 .where(EXTEND_VALUE_D_O.EXTEND_ID.eq(data.getExtendId()))
                 .and(EXTEND_VALUE_D_O.EXTEND_TYPE.eq(ExtendType.CHARACTER_EXTEND.getType()))
                 .and(EXTEND_VALUE_D_O.EXTEND_NAME.in("expRate", "dropRate", "mesoRate")));
-        Character character = getCharacter(data);
-        character.resetPlayerRates();
-        character.setWorldRates();
-        character.setCouponRates();
+        Character character = findOnlineCharacter(data);
+        if (character != null) {
+            character.resetPlayerRates();
+            character.setWorldRates();
+            character.setCouponRates();
+        }
     }
 
     public void resetMerchant() {
@@ -190,7 +218,7 @@ public class CharacterService {
                     .from(CHARACTERS_D_O)
                     .leftJoin(ACCOUNTS_D_O).on(CHARACTERS_D_O.ACCOUNTID.eq(ACCOUNTS_D_O.ID))
                     .where(CHARACTERS_D_O.GM.lt(2))
-                    .and(ACCOUNTS_D_O.BANNED.eq(0).or(ACCOUNTS_D_O.TEMPBAN.isNull()))
+                    .and(ACCOUNTS_D_O.BANNED.eq(0)).and(ACCOUNTS_D_O.TEMPBAN.isNull().or(ACCOUNTS_D_O.TEMPBAN.le(now())))
                     .and(CHARACTERS_D_O.WORLD.between(0, worldSize - 1))
                     .orderBy(CHARACTERS_D_O.WORLD.asc(), CHARACTERS_D_O.LEVEL.desc(), CHARACTERS_D_O.EXP.desc(), CHARACTERS_D_O.LAST_EXP_GAIN_TIME.asc())
                     .limit(50);
@@ -212,7 +240,7 @@ public class CharacterService {
                 .from(CHARACTERS_D_O)
                 .leftJoin(ACCOUNTS_D_O).on(CHARACTERS_D_O.ACCOUNTID.eq(ACCOUNTS_D_O.ID))
                 .where(CHARACTERS_D_O.GM.lt(2))
-                .and(ACCOUNTS_D_O.BANNED.eq(0).or(ACCOUNTS_D_O.TEMPBAN.isNull()))
+                .and(ACCOUNTS_D_O.BANNED.eq(0)).and(ACCOUNTS_D_O.TEMPBAN.isNull().or(ACCOUNTS_D_O.TEMPBAN.le(now())))
                 .and(CHARACTERS_D_O.WORLD.eq(worldId))
                 .orderBy(CHARACTERS_D_O.LEVEL.desc(), CHARACTERS_D_O.EXP.desc(), CHARACTERS_D_O.LAST_EXP_GAIN_TIME.asc())
                 .limit(50);
@@ -341,6 +369,38 @@ public class CharacterService {
         // 补充heaven没有删除的2张表
         nameChangeService.cancelPendingNameChange(cid, false);
         worldTransferService.cancelPendingWorldTransfer(cid, false);
+
+        // 删除玩家NPC(playernpcs 按角色名关联),走 mapper 纳入当前事务,避免独立连接绕过回滚
+        List<PlayernpcsDO> playerNpcs = playernpcsMapper.selectListByQuery(
+                QueryWrapper.create().where(PLAYERNPCS_D_O.NAME.eq(charactersDO.getName())));
+        if (!playerNpcs.isEmpty()) {
+            List<Integer> playerNpcIds = playerNpcs.stream().map(PlayernpcsDO::getId).toList();
+            playernpcsEquipMapper.deleteByQuery(QueryWrapper.create().where(PLAYERNPCS_EQUIP_D_O.NPCID.in(playerNpcIds)));
+            playernpcsMapper.deleteByQuery(QueryWrapper.create().where(PLAYERNPCS_D_O.ID.in(playerNpcIds)));
+        }
+        // 删除快递(duey):先删收件/发件包裹的物品,再删包裹
+        List<DueypackagesDO> dueyPackages = dueypackagesMapper.selectListByQuery(QueryWrapper.create()
+                .where(DUEYPACKAGES_D_O.RECEIVERID.eq(cid))
+                .or(DUEYPACKAGES_D_O.SENDERNAME.eq(charactersDO.getName())));
+        if (!dueyPackages.isEmpty()) {
+            List<Long> packageIds = dueyPackages.stream().map(DueypackagesDO::getPackageid).toList();
+            dueyitemsMapper.deleteByQuery(QueryWrapper.create().where(DUEYITEMS_D_O.PACKAGEID.in(packageIds)));
+            dueypackagesMapper.deleteByQuery(QueryWrapper.create().where(DUEYPACKAGES_D_O.PACKAGEID.in(packageIds)));
+        }
+        // 删除举报记录
+        reportsMapper.deleteByQuery(QueryWrapper.create()
+                .where(REPORTS_D_O.REPORTERID.eq(cid))
+                .or(REPORTS_D_O.VICTIMID.eq(cid)));
+        // 删除礼物记录
+        giftsMapper.deleteByQuery(QueryWrapper.create().where(GIFTS_D_O.TO.eq(cid)));
+        // 删除婚姻记录(双向)
+        marriagesMapper.deleteByQuery(QueryWrapper.create()
+                .where(MARRIAGES_D_O.HUSBANDID.eq(cid))
+                .or(MARRIAGES_D_O.WIFEID.eq(cid)));
+        // 删除信件
+        notesMapper.deleteByQuery(QueryWrapper.create()
+                .where(NOTES_D_O.TO.eq(charactersDO.getName()))
+                .or(NOTES_D_O.FROM.eq(charactersDO.getName())));
     }
 
     @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_UNCOMMITTED)
@@ -468,6 +528,7 @@ public class CharacterService {
         }
         chr.setStorage(accountStorage);
         chr.reapplyLocalStats();
+        chr.initEquipSkillBonus();   // 记录装备技能加成基线(库中技能等级已是穿戴态有效值)
         chr.changeHpMp(charactersDO.getHp(), charactersDO.getMp(), true);
         return chr;
     }
@@ -620,7 +681,7 @@ public class CharacterService {
         RequireUtil.requireNotEmpty(data.getExtendName(), I18nUtil.getExceptionMessage("PARAMETER_SHOULD_NOT_EMPTY", "extendName"));
     }
 
-    private Character getCharacter(ExtendValueDO data) {
+    private Character findOnlineCharacter(ExtendValueDO data) {
         for (World world : Server.getInstance().getWorlds()) {
             for (Character character : world.getPlayerStorage().getAllCharacters()) {
                 if (ExtendType.isAccount(data.getExtendType()) && Objects.equals(String.valueOf(character.getAccountId()), data.getExtendId())) {
@@ -632,6 +693,6 @@ public class CharacterService {
                 }
             }
         }
-        throw BizException.illegalArgument(I18nUtil.getExceptionMessage("CharacterService.getCharacter.exception1"));
+        return null;
     }
 }

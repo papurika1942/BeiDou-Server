@@ -1,5 +1,7 @@
 package org.gms.controller;
 
+import org.springframework.security.access.prepost.PreAuthorize;
+
 import com.mybatisflex.core.paginate.Page;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -19,6 +21,7 @@ import java.util.List;
 @RestController
 @AllArgsConstructor
 @RequestMapping("/character")
+@PreAuthorize("hasRole('ADMIN')")
 public class CharacterController {
     private final CharacterService characterService;
 
@@ -41,7 +44,7 @@ public class CharacterController {
 
     @Tag(name = "/character/" + ApiConstant.LATEST)
     @Operation(summary = "重置玩家个人所有倍率")
-    @GetMapping("/" + ApiConstant.LATEST + "/resetRates")
+    @PostMapping("/" + ApiConstant.LATEST + "/resetRates")
     public ResultBody<Object> resetRates(@RequestBody SubmitBody<ExtendValueDO> submitBody) {
         characterService.resetRates(submitBody.getData());
         return ResultBody.success();

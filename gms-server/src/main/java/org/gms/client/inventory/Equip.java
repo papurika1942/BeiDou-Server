@@ -35,6 +35,7 @@ import org.slf4j.LoggerFactory;
 import org.gms.server.ItemInformationProvider;
 import org.gms.util.Pair;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -79,6 +80,9 @@ public class Equip extends Item {
     private int ringid = -1;
     private boolean wear = false;
     private boolean isUpgradeable, isElemental = false;    // timeless or reverse, or any equip that could levelup on GMS for all effects
+    // 永恒/重生类装备的技能加成(技能id -> 加成等级),装备等级达到 skillBonusRequireLevel 后生效
+    private Map<Integer, Integer> skillBonus = new HashMap<>();
+    private int skillBonusRequireLevel = Integer.MAX_VALUE;
     private static ItemInformationProvider ii = ItemInformationProvider.getInstance();
 
     public Equip(int id, short position) {
@@ -117,12 +121,15 @@ public class Equip extends Item {
         ret.upgradeSlots = upgradeSlots;
         ret.itemLevel = itemLevel;
         ret.itemExp = itemExp;
+        ret.skillBonus = new HashMap<>(skillBonus);
+        ret.skillBonusRequireLevel = skillBonusRequireLevel;
         ret.level = level;
         ret.itemLog = new LinkedList<>(itemLog);
         ret.setOwner(getOwner());
         ret.setQuantity(getQuantity());
         ret.setExpiration(getExpiration());
         ret.setGiftFrom(getGiftFrom());
+        ret.ringid = ringid;
         return ret;
     }
 
@@ -400,17 +407,23 @@ public class Equip extends Item {
         }
     }
     private void improveDefaultStats(List<Pair<StatUpgrade, Integer>> stats) {
+        // 基础属性(STR/DEX/INT/LUK)只随机提升其中一个
+        List<StatUpgrade> baseCandidates = new ArrayList<>();
         if (dex > 0) {
-            getUnitStatUpgrade(stats, StatUpgrade.incDEX, dex, true);
+            baseCandidates.add(StatUpgrade.incDEX);
         }
         if (str > 0) {
-            getUnitStatUpgrade(stats, StatUpgrade.incSTR, str, true);
+            baseCandidates.add(StatUpgrade.incSTR);
         }
         if (_int > 0) {
-            getUnitStatUpgrade(stats, StatUpgrade.incINT, _int, true);
+            baseCandidates.add(StatUpgrade.incINT);
         }
         if (luk > 0) {
-            getUnitStatUpgrade(stats, StatUpgrade.incLUK, luk, true);
+            baseCandidates.add(StatUpgrade.incLUK);
+        }
+        if (!baseCandidates.isEmpty()) {
+            // 普通装备:4种基础属性只随机提升一种,数值固定1~2
+            stats.add(new Pair<>(baseCandidates.get(Randomizer.nextInt(baseCandidates.size())), Randomizer.rand(1, 2)));
         }
         if (hp > 0) {
             getUnitStatUpgrade(stats, StatUpgrade.incMHP, hp, false);
@@ -653,14 +666,20 @@ public class Equip extends Item {
         }
 
         // 通知客户端更新装备状态
-        c.getPlayer().equipChanged();
-        c.getPlayer().showHint(I18nUtil.getMessage("Equip.gainStats.showHint", ii.getName(this.getItemId()), itemLevel), 300); // 显示等级提升的消息
-        c.getPlayer().dropMessage(6, lvupStr); // 显示属性提升的消息
+        // Shared BotClient has no Character (BotClient never sets one), so there is no real
+        // client to notify — skip the whole notification block instead of NPE-ing. Everything
+        // above (stat roll, upgrade slots, itemLevel++) is real game state and still applies;
+        // only the client-facing effects are skipped.
+        if (c.getPlayer() != null) {
+            c.getPlayer().equipChanged();
+            c.getPlayer().showHint(I18nUtil.getMessage("Equip.gainStats.showHint", ii.getName(this.getItemId()), itemLevel), 300); // 显示等级提升的消息
+            c.getPlayer().dropMessage(6, lvupStr); // 显示属性提升的消息
 
-        // 发送装备升级的效果包
-        c.sendPacket(PacketCreator.showEquipmentLevelUp());
-        c.getPlayer().getMap().broadcastPacket(c.getPlayer(), PacketCreator.showForeignEffect(c.getPlayer().getId(), 15));
-        c.getPlayer().forceUpdateItem(this); // 强制更新装备状态
+            // 发送装备升级的效果包
+            c.sendPacket(PacketCreator.showEquipmentLevelUp());
+            c.getPlayer().getMap().broadcastPacket(c.getPlayer(), PacketCreator.showForeignEffect(c.getPlayer().getId(), 15));
+            c.getPlayer().forceUpdateItem(this); // 强制更新装备状态
+        }
     }
 
     public int getItemExp() {
@@ -685,6 +704,20 @@ public class Equip extends Item {
     }
 
     /**
+     * 计算装备的最大等级
+     */
+    public int getEquipMaxLevel() {
+        return Math.min(30, Math.max(ii.getEquipLevel(this.getItemId(), true), GameConfig.getServerInt("use_equipment_level_up")));
+    }
+
+    /**
+     * 装备是否已达到最大等级
+     */
+    public boolean isMaxLevel() {
+        return itemLevel >= getEquipMaxLevel();
+    }
+
+    /**
      * 处理装备经验值的增加逻辑（Ronan 的装备经验值获取方法）
      * @param c 客户端对象
      * @param gain 获得的经验值
@@ -694,7 +727,7 @@ public class Equip extends Item {
             return;
         }
 
-        int equipMaxLevel = Math.min(30, Math.max(ii.getEquipLevel(this.getItemId(), true), GameConfig.getServerInt("use_equipment_level_up")));// 计算装备的最大等级
+        int equipMaxLevel = getEquipMaxLevel();// 计算装备的最大等级
         if (itemLevel >= equipMaxLevel) {
             return;
         }
@@ -711,7 +744,7 @@ public class Equip extends Item {
         int expNeeded = ExpTable.getEquipExpNeededForLevel(itemLevel);
 
         // 调试信息：显示经验值获取详情
-        if (GameConfig.getServerBoolean("use_debug_show_eqp_exp")) {
+        if (GameConfig.getServerBoolean("use_debug_show_eqp_exp") && c.getPlayer() != null) {
             log.info("{} -> EXP Gain: {}, Mastery: {}, Base gain: {}, exp: {} / {}, Kills TNL: {}", ii.getName(getItemId()),
                     gain, masteryModifier, baseExpGain, itemExp, expNeeded, expNeeded / (baseExpGain / c.getPlayer().getExpRate()));
         }
@@ -731,7 +764,13 @@ public class Equip extends Item {
             }
         }
 
-        c.getPlayer().forceUpdateItem(this);// 通知客户端更新装备状态
+        // Shared BotClient has no Character (BotClient never sets one): there is no real
+        // client to notify, so skip the packet instead of NPE-ing. The equip EXP/level
+        // calculation above is unaffected — only the client refresh is skipped.
+        // Same guard style as Client.announceBossHpBar.
+        if (c.getPlayer() != null) {
+            c.getPlayer().forceUpdateItem(this);// 通知客户端更新装备状态
+        }
     }
 
     private boolean reachedMaxLevel() {
@@ -762,6 +801,25 @@ public class Equip extends Item {
 
     public void setItemLevel(byte level) {
         this.itemLevel = level;
+    }
+
+    /**
+     * 设置装备的技能加成数据(来自WZ的 case/Skill 节点)
+     */
+    public void setSkillBonus(Map<Integer, Integer> skillBonus, int requireLevel) {
+        this.skillBonus = skillBonus;
+        this.skillBonusRequireLevel = requireLevel;
+    }
+
+    public Map<Integer, Integer> getSkillBonus() {
+        return skillBonus;
+    }
+
+    /**
+     * 装备等级达到要求后技能加成生效
+     */
+    public boolean hasActiveSkillBonus() {
+        return itemLevel >= skillBonusRequireLevel && !skillBonus.isEmpty();
     }
 
     @Override

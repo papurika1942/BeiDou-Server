@@ -68,6 +68,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * @author Matze
@@ -101,7 +102,7 @@ public class ItemInformationProvider {
     protected Map<Integer, Integer> wholePriceCache = new HashMap<>();
     protected Map<Integer, Double> unitPriceCache = new HashMap<>();
     protected Map<Integer, Integer> projectileWatkCache = new HashMap<>();
-    protected Map<Integer, Pair<String, String>> nameDescCache = new HashMap<>();
+    protected Map<Integer, Pair<String, String>> nameDescCache = new ConcurrentHashMap<>();
     protected Map<Integer, String> msgCache = new HashMap<>();
     protected Map<Integer, Boolean> accountItemRestrictionCache = new HashMap<>();
     protected Map<Integer, Boolean> dropRestrictionCache = new HashMap<>();
@@ -132,6 +133,7 @@ public class ItemInformationProvider {
     protected Map<Integer, MakerItemFactory.MakerItemCreateEntry> makerItemCache = new HashMap<>();
     protected Map<Integer, Integer> makerCatalystCache = new HashMap<>();
     protected Map<Integer, Map<String, Integer>> skillUpgradeCache = new HashMap<>();
+    protected Map<Integer, Pair<Integer, Map<Integer, Integer>>> equipSkillBonusCache = new HashMap<>();
     protected Map<Integer, Data> skillUpgradeInfoCache = new HashMap<>();
     protected Map<Integer, Pair<Integer, Set<Integer>>> cashPetFoodCache = new HashMap<>();
     protected Map<Integer, QuestConsItem> questItemConsCache = new HashMap<>();
@@ -1205,6 +1207,8 @@ public class ItemInformationProvider {
         Equip nEquip;
         nEquip = new Equip(equipId, (byte) 0, ringId);
         nEquip.setQuantity((short) 1);
+        Pair<Integer, Map<Integer, Integer>> skillBonus = getEquipSkillBonus(equipId);
+        nEquip.setSkillBonus(skillBonus.getRight(), skillBonus.getLeft());
         Map<String, Integer> stats = this.getEquipStats(equipId);
         if (stats != null) {
             for (Entry<String, Integer> stat : stats.entrySet()) {
@@ -1844,7 +1848,7 @@ public class ItemInformationProvider {
         int id = equip.getItemId();
 
         if (ItemId.isWeddingRing(id) && chr.hasJustMarried()) {
-            chr.dropMessage(5, "The Wedding Ring cannot be equipped on this map.");  // will dc everyone due to doubled couple effect
+            chr.dropMessage(5, "这张地图上无法佩戴结婚戒指。");  // will dc everyone due to doubled couple effect
             return false;
         }
 
@@ -1973,43 +1977,98 @@ public class ItemInformationProvider {
         return eqLevel;
     }
 
+    /**
+     * 读取永恒/重生类装备的技能加成(case/Skill 节点),返回 (触发装备等级, 技能id->加成等级)。
+     * 结果按物品缓存。
+     */
+    public Pair<Integer, Map<Integer, Integer>> getEquipSkillBonus(int itemId) {
+        Pair<Integer, Map<Integer, Integer>> cached = equipSkillBonusCache.get(itemId);
+        if (cached != null) {
+            return cached;
+        }
+
+        Pair<Integer, Map<Integer, Integer>> ret = new Pair<>(Integer.MAX_VALUE, new HashMap<>());
+        Data item = getItemData(itemId);
+        if (item != null) {
+            Data info = item.getChildByPath("info");
+            Data level = info != null ? info.getChildByPath("level") : null;
+            Data caseData = level != null ? level.getChildByPath("case") : null;
+            if (caseData != null) {
+                for (Data caseEntry : caseData) {
+                    for (Data lvNode : caseEntry) {
+                        Data skillData = lvNode.getChildByPath("Skill");
+                        if (skillData != null) {
+                            int requireLevel = Integer.parseInt(lvNode.getName());
+                            Map<Integer, Integer> bonuses = new HashMap<>();
+                            for (Data skillEntry : skillData) {
+                                bonuses.put(DataTool.getInt("id", skillEntry, 0), DataTool.getInt("level", skillEntry, 0));
+                            }
+                            ret = new Pair<>(requireLevel, bonuses);
+                        }
+                    }
+                }
+            }
+        }
+
+        equipSkillBonusCache.put(itemId, ret);
+        return ret;
+    }
+
     public List<Pair<String, Integer>> getItemLevelupStats(int itemId, int level) {
         List<Pair<String, Integer>> list = new LinkedList<>();
         Data data = getEquipLevelInfo(itemId);
         if (data != null) {
             Data data2 = data.getChildByPath(Integer.toString(level));
             if (data2 != null) {
+                // 基础属性(STR/DEX/INT/LUK)只随机提升其中一个
+                List<String> baseStats = new ArrayList<>();
                 for (Data da : data2.getChildren()) {
-                    if (Math.random() < 0.9) {
-                        if (da.getName().startsWith("incDEXMin")) {
-                            list.add(new Pair<>("incDEX", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incDEXMax")))));
-                        } else if (da.getName().startsWith("incSTRMin")) {
-                            list.add(new Pair<>("incSTR", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incSTRMax")))));
-                        } else if (da.getName().startsWith("incINTMin")) {
-                            list.add(new Pair<>("incINT", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incINTMax")))));
-                        } else if (da.getName().startsWith("incLUKMin")) {
-                            list.add(new Pair<>("incLUK", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incLUKMax")))));
-                        } else if (da.getName().startsWith("incMHPMin")) {
-                            list.add(new Pair<>("incMHP", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incMHPMax")))));
-                        } else if (da.getName().startsWith("incMMPMin")) {
-                            list.add(new Pair<>("incMMP", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incMMPMax")))));
-                        } else if (da.getName().startsWith("incPADMin")) {
-                            list.add(new Pair<>("incPAD", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incPADMax")))));
-                        } else if (da.getName().startsWith("incMADMin")) {
-                            list.add(new Pair<>("incMAD", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incMADMax")))));
-                        } else if (da.getName().startsWith("incPDDMin")) {
-                            list.add(new Pair<>("incPDD", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incPDDMax")))));
-                        } else if (da.getName().startsWith("incMDDMin")) {
-                            list.add(new Pair<>("incMDD", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incMDDMax")))));
-                        } else if (da.getName().startsWith("incACCMin")) {
-                            list.add(new Pair<>("incACC", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incACCMax")))));
-                        } else if (da.getName().startsWith("incEVAMin")) {
-                            list.add(new Pair<>("incEVA", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incEVAMax")))));
-                        } else if (da.getName().startsWith("incSpeedMin")) {
-                            list.add(new Pair<>("incSpeed", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incSpeedMax")))));
-                        } else if (da.getName().startsWith("incJumpMin")) {
-                            list.add(new Pair<>("incJump", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incJumpMax")))));
+                    String name = da.getName();
+                    if (name.startsWith("incDEXMin") || name.startsWith("incSTRMin") || name.startsWith("incINTMin") || name.startsWith("incLUKMin")) {
+                        baseStats.add(name);
+                    }
+                }
+                String chosenBase = baseStats.isEmpty() ? null : baseStats.get(Randomizer.nextInt(baseStats.size()));
+
+                for (Data da : data2.getChildren()) {
+                    String name = da.getName();
+                    boolean isBase = name.startsWith("incDEXMin") || name.startsWith("incSTRMin") || name.startsWith("incINTMin") || name.startsWith("incLUKMin");
+                    if (isBase) {
+                        if (!name.equals(chosenBase)) {
+                            continue;   // 基础属性只提升被选中的一个
                         }
+                    } else if (Math.random() >= 0.9) {
+                        continue;   // 其它属性维持原有概率
+                    }
+
+                    if (name.startsWith("incDEXMin")) {
+                        list.add(new Pair<>("incDEX", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incDEXMax")))));
+                    } else if (name.startsWith("incSTRMin")) {
+                        list.add(new Pair<>("incSTR", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incSTRMax")))));
+                    } else if (name.startsWith("incINTMin")) {
+                        list.add(new Pair<>("incINT", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incINTMax")))));
+                    } else if (name.startsWith("incLUKMin")) {
+                        list.add(new Pair<>("incLUK", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incLUKMax")))));
+                    } else if (name.startsWith("incMHPMin")) {
+                        list.add(new Pair<>("incMHP", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incMHPMax")))));
+                    } else if (name.startsWith("incMMPMin")) {
+                        list.add(new Pair<>("incMMP", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incMMPMax")))));
+                    } else if (name.startsWith("incPADMin")) {
+                        list.add(new Pair<>("incPAD", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incPADMax")))));
+                    } else if (name.startsWith("incMADMin")) {
+                        list.add(new Pair<>("incMAD", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incMADMax")))));
+                    } else if (name.startsWith("incPDDMin")) {
+                        list.add(new Pair<>("incPDD", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incPDDMax")))));
+                    } else if (name.startsWith("incMDDMin")) {
+                        list.add(new Pair<>("incMDD", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incMDDMax")))));
+                    } else if (name.startsWith("incACCMin")) {
+                        list.add(new Pair<>("incACC", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incACCMax")))));
+                    } else if (name.startsWith("incEVAMin")) {
+                        list.add(new Pair<>("incEVA", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incEVAMax")))));
+                    } else if (name.startsWith("incSpeedMin")) {
+                        list.add(new Pair<>("incSpeed", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incSpeedMax")))));
+                    } else if (name.startsWith("incJumpMin")) {
+                        list.add(new Pair<>("incJump", Randomizer.rand(DataTool.getInt(da), DataTool.getInt(data2.getChildByPath("incJumpMax")))));
                     }
                 }
             }

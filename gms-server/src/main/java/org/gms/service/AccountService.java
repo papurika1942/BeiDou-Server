@@ -10,6 +10,7 @@ import org.gms.client.DefaultDates;
 import org.gms.config.GameConfig;
 import org.gms.dao.entity.*;
 import org.gms.dao.mapper.*;
+import org.gms.model.dto.AccountListDTO;
 import org.gms.model.dto.AddAccountDTO;
 import org.gms.model.dto.UpdateAccountByGmDTO;
 import org.gms.model.dto.UpdateAccountByUserDTO;
@@ -20,9 +21,11 @@ import org.gms.util.BCrypt;
 import org.gms.util.HexTool;
 import org.gms.util.I18nUtil;
 import org.gms.util.RequireUtil;
+import org.springframework.beans.BeanUtils;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -59,14 +62,14 @@ public class AccountService {
         return findByName(userDetails.getUsername());
     }
 
-    public Page<AccountsDO> getAccountList(Integer page,
-                                           Integer size,
-                                           Integer id,
-                                           String name,
-                                           String lastLoginStart,
-                                           String lastLoginEnd,
-                                           String createdAtStart,
-                                           String createdAtEnd) {
+    public Page<AccountListDTO> getAccountList(Integer page,
+                                               Integer size,
+                                               Integer id,
+                                               String name,
+                                               String lastLoginStart,
+                                               String lastLoginEnd,
+                                               String createdAtStart,
+                                               String createdAtEnd) {
         QueryWrapper queryWrapper = new QueryWrapper();
         if (id != null) queryWrapper.eq("id", id);
         if (name != null) queryWrapper.like("name", name);
@@ -76,8 +79,17 @@ public class AccountService {
         if (createdAtEnd != null) queryWrapper.le(AccountsDO::getCreatedat, createdAtEnd);
 
         if (page == null) page = 1;
-        if (size == null) size = Integer.MAX_VALUE;
-        return accountsMapper.paginateWithRelations(page, size, queryWrapper);
+        // 分页参数钳制:null/非正数用默认值,超大值封顶,避免非法入参导致分页异常
+        if (size == null || size < 1) size = 100;
+        if (size > 100) size = 100;
+        Page<AccountsDO> accountsPage = accountsMapper.paginateWithRelations(page, size, queryWrapper);
+        Page<AccountListDTO> result = new Page<>(accountsPage.getPageNumber(), accountsPage.getPageSize(), accountsPage.getTotalRow());
+        result.setRecords(accountsPage.getRecords().stream().map(account -> {
+            AccountListDTO dto = new AccountListDTO();
+            BeanUtils.copyProperties(account, dto);
+            return dto;
+        }).toList());
+        return result;
     }
 
     public void update(AccountsDO condition) {
@@ -178,8 +190,19 @@ public class AccountService {
         return GameConfig.getServerBoolean("bcrypt_migration") ? BCrypt.hashpw(password, BCrypt.gensalt(12)) : BCrypt.hashpwSHA512(password);
     }
 
+    /**
+     * Password encoding entry point for ephemeral credentials supplied by
+     * extensions. Callers remain responsible for clearing the source array.
+     */
+    public String encryptPassword(char[] password) throws NoSuchAlgorithmException {
+        return encryptPassword(String.valueOf(password));
+    }
+
     public boolean checkPassword(String pwd, AccountsDO accountsDO) {
         String passHash = accountsDO.getPassword();
+        if (passHash == null || passHash.length() < 2) {
+            return false;
+        }
         if (passHash.charAt(0) == '$' && passHash.charAt(1) == '2' && BCrypt.checkpw(pwd, passHash)) {
             return true;
         } else {
@@ -206,6 +229,7 @@ public class AccountService {
         accountsMapper.update(account);
     }
 
+    @Transactional(rollbackFor = Exception.class)
     public void banAccount(int accountId, String reason) {
         RequireUtil.requireNotNull(findById(accountId), I18nUtil.getExceptionMessage("AccountService.id.NotExist"));
 
@@ -219,7 +243,9 @@ public class AccountService {
         List<CharactersDO> characterList = charactersMapper.selectIdAndWorldListByAccountId(accountId); // 仅查询角色ID和所在world
         for (CharactersDO chr : characterList) {
             World world = Server.getInstance().getWorld(chr.getWorld());
-            if (world == null) continue;
+            if (world == null) {
+                continue;
+            }
             Character player = world.getPlayerStorage().getCharacterById(chr.getId());
             if (player == null) continue; // 角色离线
             player.setBanned(true);

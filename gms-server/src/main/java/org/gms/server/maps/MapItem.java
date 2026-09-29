@@ -37,7 +37,7 @@ public class MapItem extends AbstractMapObject {
     protected MapObject dropper;
     protected int character_ownerid, party_ownerid, meso, questid = -1;
     protected byte type;
-    protected boolean pickedUp = false, playerDrop, partyDrop;
+    protected boolean pickedUp = false, playerDrop, partyDrop, permanentOwner;
     protected long dropTime;
     private final Lock itemLock = new ReentrantLock();
 
@@ -154,11 +154,12 @@ public class MapItem extends AbstractMapObject {
     }
 
     public final boolean hasClientsideOwnership(Character player) {
-        return this.character_ownerid == player.getId() || this.party_ownerid == player.getPartyId() || hasExpiredOwnershipTime();
+        return this.character_ownerid == player.getId() || this.party_ownerid == player.getPartyId()
+                || (!permanentOwner && hasExpiredOwnershipTime());
     }
 
     public final boolean isFFADrop() {
-        return type == 2 || type == 3 || hasExpiredOwnershipTime();
+        return !permanentOwner && (type == 2 || type == 3 || hasExpiredOwnershipTime());
     }
 
     public final boolean hasExpiredOwnershipTime() {
@@ -195,7 +196,40 @@ public class MapItem extends AbstractMapObject {
             }
         }
 
-        return hasExpiredOwnershipTime();
+        return !permanentOwner && hasExpiredOwnershipTime();
+    }
+
+    /**
+     * 标记本掉落物为"永久归属"。置位后 {@link #hasClientsideOwnership} /
+     * {@link #isFFADrop} / {@link #canBePickedBy} 不再因归属超时而放开拾取，
+     * 即只有 owner 本人(或其队伍)能捡。
+     *
+     * <p><b>并发约束:</b>与 {@link #setPartyOwnerIdLocked(int)} 相同 ——
+     * {@code permanentOwner} 被上述几个方法读取,调用方必须已持有
+     * {@link #itemLock},否则与持锁路径并发时会出现字段撕裂。
+     *
+     * @deprecated 方法名未体现持锁约定,请改用 {@link #setPermanentOwnerLocked(boolean)}。
+     *             保留仅为兼容既有插件(solomapling-plugin 的 DropCommands)。
+     */
+    @Deprecated
+    public void setPermanentOwner(boolean permanentOwner) {
+        this.permanentOwner = permanentOwner;
+    }
+
+    /**
+     * 同 {@link #setPermanentOwner(boolean)},方法名显式体现"调用方须已持有
+     * {@link #itemLock}"的约定,与 {@link #setPartyOwnerIdLocked(int)} 一致。
+     *
+     * <p><b>并发约束:</b>{@code permanentOwner} 被 {@link #hasClientsideOwnership} /
+     * {@link #isFFADrop} / {@link #canBePickedBy} 读取,这些方法的调用方均需
+     * 持锁,因此写入也必须在锁内,否则会出现字段撕裂。
+     */
+    public void setPermanentOwnerLocked(boolean permanentOwner) {
+        this.permanentOwner = permanentOwner;
+    }
+
+    public final boolean isPermanentOwner() {
+        return permanentOwner;
     }
 
     public final Client getOwnerClient() {

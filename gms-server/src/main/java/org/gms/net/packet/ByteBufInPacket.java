@@ -51,6 +51,9 @@ public class ByteBufInPacket implements InPacket {
     @Override
     public String readString() {
         short length = readShort();
+        if (length < 0) {
+            return "";
+        }
         byte[] stringBytes = new byte[length];
         byteBuf.readBytes(stringBytes);
         return new String(stringBytes, CharsetConstants.getCharset(ThreadLocalUtil.getClientLang()));
@@ -105,5 +108,10 @@ public class ByteBufInPacket implements InPacket {
         StringBuilder sb = new StringBuilder(hexDump);
         sb.insert(2 * index, '_');
         return sb.toString();
+    }
+
+    @Override
+    public InPacket copy() {
+        return new ByteBufInPacket(byteBuf.copy());
     }
 }

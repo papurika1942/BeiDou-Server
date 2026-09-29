@@ -112,7 +112,7 @@ public class ItemAction extends AbstractQuestAction {
 
             if (iEntry.getProp() != null) {
                 if (iEntry.getProp() == -1) {
-                    if (extSelection != extNum++) {
+                    if (extSelection == null || extSelection != extNum++) {
                         continue;
                     }
                 } else {
@@ -143,7 +143,7 @@ public class ItemAction extends AbstractQuestAction {
             if (type.equals(InventoryType.EQUIP)) {
                 if (chr.getInventory(type).countById(itemid) < quantity) {
                     // Not enough in the equip inventoty, so check Equipped...
-                    if (chr.getInventory(InventoryType.EQUIPPED).countById(itemid) > quantity) {
+                    if (chr.getInventory(InventoryType.EQUIPPED).countById(itemid) >= quantity) {
                         // Found it equipped, so change the type to equipped.
                         type = InventoryType.EQUIPPED;
                     }
@@ -199,7 +199,7 @@ public class ItemAction extends AbstractQuestAction {
 
                     int freeSlotCount = chr.getInventory(type).freeSlotCountById(item.getId(), quantity);
                     if (freeSlotCount == -1) {
-                        if (type.equals(InventoryType.EQUIP) && chr.getInventory(InventoryType.EQUIPPED).countById(item.getId()) > quantity) {
+                        if (type.equals(InventoryType.EQUIP) && chr.getInventory(InventoryType.EQUIPPED).countById(item.getId()) >= quantity) {
                             continue;
                         }
 
@@ -236,8 +236,10 @@ public class ItemAction extends AbstractQuestAction {
         }
 
         if (!selectList.isEmpty()) {
-            Pair<Item, InventoryType> selected = selectList.get(extSelection);
-            gainList.add(selected);
+            if (extSelection != null && extSelection >= 0 && extSelection < selectList.size()) {
+                Pair<Item, InventoryType> selected = selectList.get(extSelection);
+                gainList.add(selected);
+            }
         }
 
         if (!canHold(chr, gainList)) {
@@ -255,7 +257,7 @@ public class ItemAction extends AbstractQuestAction {
     private void announceInventoryLimit(List<Integer> itemids, Character chr) {
         for (Integer id : itemids) {
             if (ItemInformationProvider.getInstance().isPickupRestricted(id) && chr.haveItemWithId(id, true)) {
-                chr.dropMessage(1, "Please check if you already have a similar one-of-a-kind item in your inventory.");
+                chr.dropMessage(1, "请检查你的背包中是否已有类似的唯一物品。");
                 return;
             }
         }

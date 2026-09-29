@@ -267,7 +267,7 @@ public final class PlayerInteractionHandler extends AbstractPacketHandler {
                         //c.sendPacket(PacketCreator.getPlayerShopRemoveVisitor(1));
                     } else if (ItemConstants.isHiredMerchant(itemId)) {
                         if (chr.hasMerchant() || c.getWorldServer().getHiredMerchant(chr.getId()) != null) {
-                            chr.dropMessage(1, "You already have a store open.");
+                            chr.dropMessage(1, "你已经开了一家商店。");
                             log.warn("Character {} attempted to create a duplicate HiredMerchant on channel {}",
                                     chr.getName(), c.getChannel());
                             return;
@@ -284,7 +284,7 @@ public final class PlayerInteractionHandler extends AbstractPacketHandler {
                             if (channelAdded) {
                                 channelServer.removeHiredMerchant(chr.getId(), merchant);
                             }
-                            chr.dropMessage(1, "You already have a store open.");
+                            chr.dropMessage(1, "你已经开了一家商店。");
                             log.warn("Character {} could not create HiredMerchant because a channel or world instance already exists",
                                     chr.getName());
                         }
@@ -415,12 +415,15 @@ public final class PlayerInteractionHandler extends AbstractPacketHandler {
                 }
             } else if (mode == Action.READY.getCode()) {
                 MiniGame game = chr.getMiniGame();
+                if (game == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
                 game.broadcast(PacketCreator.getMiniGameReady(game));
             } else if (mode == Action.UN_READY.getCode()) {
                 MiniGame game = chr.getMiniGame();
+                if (game == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
                 game.broadcast(PacketCreator.getMiniGameUnReady(game));
             } else if (mode == Action.START.getCode()) {
                 MiniGame game = chr.getMiniGame();
+                if (game == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
                 if (game.getGameType().equals(MiniGameType.OMOK)) {
                     game.minigameMatchStarted();
                     game.broadcast(PacketCreator.getMiniGameStart(game, game.getLoser()));
@@ -433,6 +436,7 @@ public final class PlayerInteractionHandler extends AbstractPacketHandler {
                 }
             } else if (mode == Action.GIVE_UP.getCode()) {
                 MiniGame game = chr.getMiniGame();
+                if (game == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
                 if (game.getGameType().equals(MiniGameType.OMOK)) {
                     if (game.isOwner(chr)) {
                         game.minigameMatchVisitorWins(true);
@@ -448,6 +452,7 @@ public final class PlayerInteractionHandler extends AbstractPacketHandler {
                 }
             } else if (mode == Action.REQUEST_TIE.getCode()) {
                 MiniGame game = chr.getMiniGame();
+                if (game == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
                 if (!game.isTieDenied(chr)) {
                     if (game.isOwner(chr)) {
                         game.broadcastToVisitor(PacketCreator.getMiniGameRequestTie(game));
@@ -457,6 +462,7 @@ public final class PlayerInteractionHandler extends AbstractPacketHandler {
                 }
             } else if (mode == Action.ANSWER_TIE.getCode()) {
                 MiniGame game = chr.getMiniGame();
+                if (game == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
                 if (p.readByte() != 0) {
                     game.minigameMatchDraw();
                 } else {
@@ -470,6 +476,7 @@ public final class PlayerInteractionHandler extends AbstractPacketHandler {
                 }
             } else if (mode == Action.SKIP.getCode()) {
                 MiniGame game = chr.getMiniGame();
+                if (game == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
                 if (game.isOwner(chr)) {
                     game.broadcast(PacketCreator.getMiniGameSkipOwner(game));
                 } else {
@@ -479,11 +486,14 @@ public final class PlayerInteractionHandler extends AbstractPacketHandler {
                 int x = p.readInt(); // x point
                 int y = p.readInt(); // y point
                 int type = p.readByte(); // piece ( 1 or 2; Owner has one piece, visitor has another, it switches every game.)  //棋子（1或2；所有者有一个棋子，访问者有另一个，它会切换每个游戏。）
-                chr.getMiniGame().setPiece(x, y, type, chr);
+                MiniGame game = chr.getMiniGame();
+                if (game == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
+                game.setPiece(x, y, type, chr);
             } else if (mode == Action.SELECT_CARD.getCode()) {
                 int turn = p.readByte(); // 1st turn = 1; 2nd turn = 0
                 int slot = p.readByte(); // slot
                 MiniGame game = chr.getMiniGame();
+                if (game == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
                 int firstslot = game.getFirstSlot();
                 if (turn == 1) {
                     game.setFirstSlot(slot);
@@ -506,7 +516,9 @@ public final class PlayerInteractionHandler extends AbstractPacketHandler {
                     game.broadcast(PacketCreator.getMatchCardSelect(game, turn, slot, firstslot, 1));
                 }
             } else if (mode == Action.SET_MESO.getCode()) {
-                chr.getTrade().setMeso(p.readInt());
+                Trade trade = chr.getTrade();
+                if (trade == null) { chr.dropMessage(1, I18nUtil.getMessage("Error.Handler.invalidRequest")); return; }
+                trade.setMeso(p.readInt());
             } else if (mode == Action.SET_ITEMS.getCode()) {
                 ItemInformationProvider ii = ItemInformationProvider.getInstance();
                 InventoryType ivType = InventoryType.getByType(p.readByte());

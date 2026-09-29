@@ -21,6 +21,7 @@
 package org.gms.client.inventory;
 
 import org.gms.util.DatabaseConnection;
+import org.gms.server.ItemInformationProvider;
 import org.gms.util.Pair;
 
 import java.sql.Connection;
@@ -29,6 +30,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.List;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -100,6 +102,8 @@ public enum ItemFactory {
 
     private static Equip loadEquipFromResultSet(ResultSet rs) throws SQLException {
         Equip equip = new Equip(rs.getInt("itemid"), (short) rs.getInt("position"));
+        Pair<Integer, Map<Integer, Integer>> skillBonus = ItemInformationProvider.getInstance().getEquipSkillBonus(rs.getInt("itemid"));
+        equip.setSkillBonus(skillBonus.getRight(), skillBonus.getLeft());
         equip.setOwner(rs.getString("owner"));
         equip.setQuantity((short) rs.getInt("quantity"));
         equip.setAcc((short) rs.getInt("acc"));
@@ -224,8 +228,11 @@ public enum ItemFactory {
                     ps.executeUpdate();
                 }
 
-                try (PreparedStatement psItem = con.prepareStatement("INSERT INTO `inventoryitems` VALUES (DEFAULT, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", Statement.RETURN_GENERATED_KEYS)) {
+                try (PreparedStatement psItem = con.prepareStatement("INSERT INTO `inventoryitems` VALUES (DEFAULT, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", Statement.RETURN_GENERATED_KEYS);
+                     PreparedStatement psEquip = con.prepareStatement("INSERT INTO `inventoryequipment` VALUES (DEFAULT, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
                     if (!items.isEmpty()) {
+                        // 物品逐条 executeUpdate 会产生大量网络往返(见保存耗时问题),改为整批插入:
+                        // 驱动对批量执行后 getGeneratedKeys() 按插入顺序返回全部自增ID(已实测验证)。
                         for (Pair<Item, InventoryType> pair : items) {
                             Item item = pair.getLeft();
                             InventoryType mit = pair.getRight();
@@ -241,19 +248,22 @@ public enum ItemFactory {
                             psItem.setInt(10, item.getFlag());
                             psItem.setLong(11, item.getExpiration());
                             psItem.setString(12, item.getGiftFrom());
-                            psItem.executeUpdate();
+                            psItem.addBatch();
+                        }
+                        psItem.executeBatch();
 
-                            if (mit.equals(InventoryType.EQUIP) || mit.equals(InventoryType.EQUIPPED)) {
-                                try (PreparedStatement psEquip = con.prepareStatement("INSERT INTO `inventoryequipment` VALUES (DEFAULT, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
-                                    try (ResultSet rs = psItem.getGeneratedKeys()) {
-                                        if (!rs.next()) {
-                                            throw new RuntimeException("Inserting item failed.");
-                                        }
+                        try (ResultSet rs = psItem.getGeneratedKeys()) {
+                            for (Pair<Item, InventoryType> pair : items) {
+                                Item item = pair.getLeft();
+                                InventoryType mit = pair.getRight();
 
-                                        psEquip.setLong(1, rs.getLong(1));
-                                    }
+                                if (!rs.next()) {
+                                    throw new RuntimeException("Inserting item failed.");
+                                }
 
+                                if (mit.equals(InventoryType.EQUIP) || mit.equals(InventoryType.EQUIPPED)) {
                                     Equip equip = (Equip) item;
+                                    psEquip.setLong(1, rs.getLong(1));
                                     psEquip.setInt(2, equip.getUpgradeSlots());
                                     psEquip.setInt(3, equip.getLevel());
                                     psEquip.setInt(4, equip.getStr());
@@ -276,10 +286,11 @@ public enum ItemFactory {
                                     psEquip.setInt(21, equip.getItemLevel());
                                     psEquip.setInt(22, equip.getItemExp());
                                     psEquip.setInt(23, equip.getRingId());
-                                    psEquip.executeUpdate();
+                                    psEquip.addBatch();
                                 }
                             }
                         }
+                        psEquip.executeBatch();
                     }
                 }
                 if (ownTransaction) {
